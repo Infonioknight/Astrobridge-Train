@@ -1,0 +1,52 @@
+# --- Capacity knobs — the ones to open as modality count grows ---
+# `d_shared` and everything under `qformer` are sized for today's 2 registered modalities
+# (image, spectra) with the joint subset dormant (see README.md's roadmap / configs/
+# modalities.yaml's dropout comment). They are NOT tied to modality count anywhere in code —
+# FusionStack/SharedQFormer read these purely from config — so scaling them up when a 3rd
+# modality is added, or when joint (cross-modal) training resumes, is a config-only change.
+# What to bump and why, per the build spec §6 ("query count is the first knob to open" if joint
+# claims come out weak):
+#   - qformer.n_queries: the hard bottleneck every cross-modal relation has to survive
+#     compression into. More modalities => more possible subset combinations (7 at 3 modalities
+#     vs. 3 at 2) => more content competing for the same fixed-size prefix. First thing to raise.
+#   - d_shared / qformer.d_model (keep these equal): the width of the space modality tokens get
+#     projected into before the Q-Former sees them. Raise alongside n_queries if per-query
+#     capacity, not just query count, looks like the bottleneck.
+#   - qformer.n_layers: more cross-attention rounds to integrate a 3rd modality's evidence
+#     against the other two. Usually the last knob to touch, not the first.
+# Verified directly during this build: constructing a FusionStack with 3 modalities and
+# d_shared=768/n_queries=64 (2x today's values) and running a real forward pass required no
+# source changes — only these numbers.
+d_shared: 384
+
+qformer:
+  n_queries: 32
+  d_model: 384
+  n_layers: 3
+  n_heads: 6
+  ffn_mult: 4
+  dropout: 0.1
+
+projector:
+  hidden_mult: 2      # 2-layer MLP: out_dim -> out_dim*hidden_mult -> d_shared
+  dropout: 0.1
+
+llm:
+  name: Qwen/Qwen3.5-9B
+  dtype: bfloat16
+  # Qwen3.5's architecture (Qwen3_5ForConditionalGeneration) mixes Gated DeltaNet layers with
+  # regular attention — not a plain Llama-style transformer. `sdpa` is the safe default; try
+  # flash_attention_2 explicitly once you've confirmed the installed `transformers`/model code
+  # actually supports it for every layer type here (it may silently only help the non-DeltaNet
+  # layers, or error — verify before relying on it for speed).
+  attn_impl: sdpa
+  trust_remote_code: true   # new/hybrid architecture — confirm you can drop this once your
+                             # installed `transformers` version has native "qwen3_5" support
+  quantization: null        # null = bf16 (~18GB weights for 9B — fits a single DDP replica on
+                             # most modern GPUs). "nf4" = QLoRA fallback if your GPUs are smaller
+                             # than that. MUST be identical in stage1 and stage2 — see §10.
+
+prompt:
+  # Text prompt template embedded ahead of the caption target. {modalities} is filled with
+  # the human-readable subset present for this example (e.g. "an image and a spectrum").
+  template: "Describe the object shown, using only {modalities}."

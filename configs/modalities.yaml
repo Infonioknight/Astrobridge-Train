@@ -1,0 +1,43 @@
+# THE modality registry. Adding a modality = editing this file (+ ~30 lines for a new `impl`
+# wrapper in src/captioner/encoders/ if no existing wrapper fits). No other file should need
+# to change — see acceptance test in 05_build_spec_image_spectra.md §3.
+
+modalities:
+  image:
+    encoder:
+      impl: aion_image                       # wrapper class in encoders/registry.py
+      hf_path: polymathic-ai/aion-base       # actual weights — swap this for ablations
+      revision: null                         # pin a commit sha for reproducibility
+      kwargs:
+        bands: [DES-G, DES-R, DES-Z]
+    out_dim: 768                             # asserted against the encoder's real output at load
+    max_tokens: 576
+
+  spectra:
+    encoder:
+      impl: aion_spectrum
+      hf_path: polymathic-ai/aion-base
+      revision: null
+      kwargs: {}
+    out_dim: 768
+    max_tokens: 512
+
+dropout:
+  # MILESTONE 1 OF 3 — see README.md's "Where this is headed" section for the full roadmap
+  # (single-modality baseline -> restore joint -> add a 3rd modality + scale up the Q-Former).
+  # This is NOT the target end state, just the smallest slice of it: the mentors' call was to
+  # see what individual-modality captioning gives us before asking the model to reason across
+  # modalities, which is the actual goal. It's a pure config change — `_sample_target_subset` in
+  # data/dataset.py already restricts sampling to whatever subsets have weight > 0, so setting
+  # [image, spectra]'s weight to 0 here removes it from training with no code change, and setting
+  # it back is milestone 2 in full. When milestone 3 (a 3rd modality) lands, also see the
+  # capacity-knob comment in configs/model.yaml — more modalities means more possible subset
+  # combinations competing for the same fixed-size Q-Former output, so query count / d_shared
+  # typically need to grow alongside the registry, not just this weighting.
+  subset_weights:
+    - subset: [image]
+      weight: 0.5
+    - subset: [spectra]
+      weight: 0.5
+    - subset: [image, spectra]
+      weight: 0.0

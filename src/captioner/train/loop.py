@@ -1,0 +1,161 @@
+"""Generic training loop shared by stage 1 and stage 2. Must resume cleanly after kill -9 (§9
+step 6 acceptance) — every `save_every_n_steps` we write a full checkpoint (middle.pt,
+optimizer.pt, rng_state.pt, state.json) and `resume` reloads all of it, including RNG state, so
+the resumed data order is reproducible.
+
+Single-node multi-GPU (DDP, via `accelerate`) is supported directly — see
+`captioner/README.md`'s cluster section. `accelerator.accumulate(model)` handles gradient
+accumulation; only the main process writes checkpoints and logs, gated by
+`accelerator.is_main_process`, with `wait_for_everyone()` around the save so no process races
+ahead into the next epoch on a half-written checkpoint.
+
+Checkpointing here assumes DDP — a full frozen-LLM replica per GPU, which needs no gradient/
+optimizer sharding because the LLM's ~27B parameters are either frozen (stage 1) or adapted only
+via small LoRA matrices (stage 2). FSDP-style parameter sharding is not implemented: it would
+need `accelerator.get_state_dict(..., True)`-style full-state-dict gathering wired in for both
+the model and the optimizer, which DDP doesn't require. Use DDP unless a single GPU can't hold a
+full bf16 27B replica plus activations.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+import torch
+from accelerate import Accelerator
+from omegaconf import DictConfig
+from torch.utils.data import DataLoader
+
+from captioner.model.captioner import Captioner
+from captioner.train.checkpoint import load_checkpoint, save_checkpoint
+from captioner.utils.logging import get_logger
+from captioner.utils.seeding import load_rng_state
+
+logger = get_logger(__name__)
+
+
+def find_latest_checkpoint(run_dir: Path) -> Path | None:
+    if not run_dir.exists():
+        return None
+    candidates = sorted(run_dir.glob("step_*"), key=lambda p: int(p.name.split("_")[1]))
+    return candidates[-1] if candidates else None
+
+
+def _save(
+    accelerator: Accelerator,
+    model: Captioner,
+    optimizer: torch.optim.Optimizer,
+    step: int,
+    epoch: int,
+    cfg: DictConfig,
+    run_dir: Path,
+    tier_histogram: dict[str, int],
+    lora_state_fn: Callable[[], dict] | None,
+) -> None:
+    accelerator.wait_for_everyone()
+    unwrapped = accelerator.unwrap_model(model)
+    fusion_state = accelerator.get_state_dict(unwrapped.fusion_stack)
+    lora_state = lora_state_fn() if lora_state_fn is not None else None
+
+    if accelerator.is_main_process:
+        save_checkpoint(
+            run_dir, unwrapped.fusion_stack, optimizer, step, epoch, cfg, tier_histogram,
+            lora_state, fusion_state_dict_override=fusion_state,
+        )
+    accelerator.wait_for_everyone()
+
+
+def run_training(
+    accelerator: Accelerator,
+    model: Captioner,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    cfg: DictConfig,
+    run_dir: Path,
+    epochs: int,
+    early_stop_patience: int,
+    tier_histogram: dict[str, int],
+    lora_state_fn: Callable[[], dict] | None = None,
+) -> dict:
+    step = 0
+    start_epoch = 0
+    best_val_loss = float("inf")
+    epochs_without_improvement = 0
+
+    latest = find_latest_checkpoint(run_dir)
+    if latest is not None:
+        state = load_checkpoint(latest)
+        unwrapped = accelerator.unwrap_model(model)
+        unwrapped.fusion_stack.load_state_dict(
+            torch.load(state["middle_path"], map_location="cpu", weights_only=False)
+        )
+        optimizer.load_state_dict(torch.load(state["optimizer_path"], map_location="cpu", weights_only=False))
+        if accelerator.is_main_process:
+            # rng_state.pt holds numpy's RNG state tuples, not on torch's weights_only allowlist —
+            # safe here since these are our own checkpoint files, not third-party weights.
+            load_rng_state(torch.load(state["rng_path"], map_location="cpu", weights_only=False))
+        step = state["step"]
+        start_epoch = state["epoch"]
+        accelerator.print(f"Resumed from {latest} at step={step} epoch={start_epoch}")
+
+    for epoch in range(start_epoch, epochs):
+        model.train()
+        for batch in train_loader:
+            with accelerator.accumulate(model):
+                out = model(
+                    batch["modality_batch"],
+                    batch["prompt_ids"],
+                    batch["caption_ids"],
+                    batch["prompt_attn_mask"],
+                    batch["caption_attn_mask"],
+                )
+                accelerator.backward(out.loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+
+            if accelerator.sync_gradients:
+                step += 1
+                save_every = cfg.get("checkpoint", {}).get("save_every_n_steps", 500)
+                if step % save_every == 0:
+                    _save(accelerator, model, optimizer, step, epoch, cfg, run_dir / f"step_{step}", tier_histogram, lora_state_fn)
+
+        val_loss = evaluate_loss(accelerator, model, val_loader)
+        accelerator.print(f"epoch={epoch} step={step} val_loss={val_loss:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            epochs_without_improvement = 0
+            _save(accelerator, model, optimizer, step, epoch, cfg, run_dir / "best", tier_histogram, lora_state_fn)
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= early_stop_patience:
+                accelerator.print(f"Early stopping at epoch={epoch} (patience={early_stop_patience})")
+                break
+
+    return {"best_val_loss": best_val_loss, "final_step": step}
+
+
+@torch.no_grad()
+def evaluate_loss(accelerator: Accelerator, model: Captioner, loader: DataLoader) -> float:
+    model.eval()
+    total_loss = torch.zeros(1, device=accelerator.device)
+    total_n = torch.zeros(1, device=accelerator.device)
+    for batch in loader:
+        out = model(
+            batch["modality_batch"],
+            batch["prompt_ids"],
+            batch["caption_ids"],
+            batch["prompt_attn_mask"],
+            batch["caption_attn_mask"],
+        )
+        bs = batch["prompt_ids"].shape[0]
+        total_loss += out.loss.detach() * bs
+        total_n += bs
+    total_loss = accelerator.reduce(total_loss, reduction="sum")
+    total_n = accelerator.reduce(total_n, reduction="sum")
+    return (total_loss / total_n.clamp(min=1)).item()

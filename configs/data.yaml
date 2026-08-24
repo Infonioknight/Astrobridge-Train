@@ -1,0 +1,44 @@
+# Data sources, join, split, and caption-decomposition config.
+# No object/join counts are hardcoded here (see 05_build_spec_image_spectra.md §1) —
+# only warning thresholds, which are config, not spec constants.
+
+sources:
+  spectra:
+    hf_path: UniverseTBD/AstroBridge-Data
+    split: train
+  image:
+    hf_path: gapatron/legacy_survey_south_images_captions
+    revision: null   # not a `datasets.load_dataset`-shaped repo — see data/image_dataset.py.
+                      # No `split` here: it's loaded as raw file pairs, not a HF Dataset split.
+
+join:
+  key: _healpix_29
+  fallback_radius_arcsec: 1.0   # coordinate crossmatch radius when `key` isn't in both tables
+
+splits:
+  # train is implicit (everything not assigned to val/test). val/test are always drawn from
+  # joint-tier objects only, and unpaired objects always go to train — see manifest.py.
+  val: 0.1
+  test: 0.1
+  seed: ${seed}          # resolved from base.yaml at load time
+
+sanity:
+  min_joint_objects: 500      # log a loud warning below this; do not fail
+  min_per_subset: 50          # warn if any dropout-weighted subset is thinner than this
+
+manifest:
+  out_dir: outputs/manifest
+  parquet: outputs/manifest/manifest.parquet
+  stats: outputs/manifest/manifest_stats.json
+
+cache:
+  out_dir: outputs/cache
+
+captions:
+  out_dir: outputs/captions
+  parquet: outputs/captions/captions.parquet
+  report: outputs/captions/decomposition_report.json
+  # Image-tier captions come directly from gapatron's pre-vetted `caption_blind` field (see
+  # data/image_dataset.py), not from keyword-based decomposition — so `rule_based_v0` below only
+  # governs decomposition of AstroBridge-Data's `mention_summary` (spectra + relational claims).
+  generator: rule_based_v0     # swap for an LLM-backed extractor; see src/captioner/data/captions.py
