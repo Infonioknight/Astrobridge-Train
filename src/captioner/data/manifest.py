@@ -27,14 +27,16 @@ def _load_spectra_table(cfg: DictConfig) -> pd.DataFrame:
 
 
 def _load_image_table(cfg: DictConfig) -> pd.DataFrame:
-    """`gapatron/legacy_survey_south_images_captions` is not a `datasets.load_dataset`-shaped
-    repo (no columns, no ra/dec fields at all) — it's raw `{id}_rgb.png` + `{id}_captions.json`
-    file pairs. See data/image_dataset.py for what was actually confirmed about its shape and
-    why coordinates come from parsing a J2000 name instead of reading a column.
+    """Sources identity from `legacy_south_all_images.parquet`, not the caption-only RGB dataset
+    (see data/image_dataset.py) — this table's rows are objects that already have real
+    per-band calibrated flux (usable for AION), and its `object_id` is AstroBridge-Data's own id
+    (a direct join key below — see build_manifest's "object_id" join path), not a coordinate
+    match. The caption-only dataset is still used for `caption_blind` text in
+    scripts/01_generate_captions.py, just not for identity here.
     """
-    from captioner.data.image_dataset import load_image_captions_table
+    from captioner.data.image_dataset import load_image_flux_identity_table
 
-    return load_image_captions_table(
+    return load_image_flux_identity_table(
         cfg.sources.image.hf_path,
         revision=cfg.sources.image.get("revision"),
     )
@@ -68,6 +70,23 @@ def build_manifest(cfg: DictConfig) -> tuple[pd.DataFrame, dict]:
             spectra_df, image_df, on=join_key, how="outer", suffixes=("_spec", "_img")
         )
         join_method = join_key
+    elif "object_id" in image_df.columns:
+        # legacy_south_all_images.parquet's object_id is target_object_id_target — already
+        # AstroBridge-Data's own id (these rows are pre-crossmatched by the dataset authors) —
+        # a direct, authoritative join, no coordinate fuzz-matching needed for this subset.
+        overlap = image_df["object_id"].isin(spectra_df["object_id"]).mean()
+        logger.info(f"Direct object_id join: {overlap:.1%} of image-table object_ids matched a spectra object_id")
+        if overlap < 0.5:
+            logger.warning(
+                "Less than half of the image table's object_id values matched AstroBridge-Data's "
+                "object_id — the assumption that legacy_south_all_images.parquet's "
+                "target_object_id_target shares AstroBridge-Data's id namespace may not hold for "
+                "this data revision. Verify before trusting the resulting joint tier."
+            )
+        merged_key = pd.merge(
+            spectra_df, image_df, on="object_id", how="outer", suffixes=("_spec", "_img")
+        )
+        join_method = "object_id"
     else:
         logger.warning(
             f"{join_key} not present in both tables; falling back to coordinate crossmatch "
@@ -89,8 +108,8 @@ def build_manifest(cfg: DictConfig) -> tuple[pd.DataFrame, dict]:
         merged_key = pd.concat([joint, spec_only, image_only], ignore_index=True, sort=False)
         join_method = f"coord@{cfg.join.fallback_radius_arcsec}arcsec"
 
-    merged_key["has_spectra"] = merged_key.get("has_spectra", False).fillna(False)
-    merged_key["has_image"] = merged_key.get("has_image", False).fillna(False)
+    merged_key["has_spectra"] = merged_key.get("has_spectra", False).fillna(False).astype(bool)
+    merged_key["has_image"] = merged_key.get("has_image", False).fillna(False).astype(bool)
 
     def tier(row) -> str:
         if row["has_spectra"] and row["has_image"]:

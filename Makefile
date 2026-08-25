@@ -3,13 +3,16 @@
 # Override on the command line, e.g.: make stage1 ACCELERATE_CONFIG=configs/my_cluster.yaml
 ACCELERATE_CONFIG ?= configs/accelerate_ddp.yaml
 
-.PHONY: test manifest captions cache stage1 eval stage2 install
+.PHONY: test manifest captions cache stage1 eval stage2 install check-access
 
 install:
 	pip install -e ".[dev]"
 
 test:
 	pytest -q tests/
+
+check-access:
+	python scripts/check_access.py
 
 manifest:
 	python scripts/00_build_manifest.py
@@ -24,7 +27,8 @@ stage1:
 	accelerate launch --config_file $(ACCELERATE_CONFIG) scripts/03_train_stage1.py
 
 eval:
-	python scripts/04_eval.py
+	@test -n "$(CKPT)" || (echo "Usage: make eval CKPT=outputs/checkpoints/stage1/best" && exit 1)
+	python scripts/04_eval.py --checkpoint-dir $(CKPT)
 
 stage2:
 	accelerate launch --config_file $(ACCELERATE_CONFIG) scripts/05_train_stage2.py

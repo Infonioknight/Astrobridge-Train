@@ -2,12 +2,10 @@
 """Loads encoders exactly once, encodes every object that has that modality, and writes
 float16 shards + an index parquet (§5). Training never imports this module's encoders.
 
-Spectra field names (`flux`/`ivar`/`lambda`/`mask` in AstroBridge-Data's `spectrum` struct) are
-confirmed — see _spectra_batch_loader below. Image caching is currently BLOCKED: gapatron/
-legacy_survey_south_images_captions only ships rendered RGB PNGs, not the raw per-band calibrated
-flux AION's LegacySurveyImage expects — see README.md's "Known blocker" section. `--modality
-spectra` works today; `--modality image` (or no --modality flag) will raise a clear error rather
-than attempt something that would silently produce wrong embeddings.
+Both field schemas are confirmed against real data: spectra via AstroBridge-Data's `spectrum`
+struct (`flux`/`ivar`/`lambda`/`mask`), image via `legacy_south_all_images.parquet`'s
+`image_legacy` (list of per-band `{band, flux, mask, ivar, psf_fwhm, scale}` structs) — see
+data/image_dataset.py and the two batch loaders below.
 """
 from __future__ import annotations
 
@@ -56,6 +54,42 @@ def _spectra_batch_loader(raw_by_id: dict):
     return _load
 
 
+def _image_batch_loader(pixels_by_id: dict, bands: list[str]):
+    """`pixels_by_id`: {object_id: list of {band, flux, mask, ivar, psf_fwhm, scale} dicts} from
+    data/image_dataset.py:load_image_flux_pixels — real calibrated per-band flux from
+    legacy_south_all_images.parquet's `image_legacy` field. Bands are matched by name (config's
+    "DES-G" -> "g"), not by list position — position isn't guaranteed order in the source data.
+    Only `flux` is used; `mask`/`ivar`/`psf_fwhm`/`scale` aren't part of AION's LegacySurveyImage
+    constructor (confirmed against a working probe script — see aion_image.py).
+    """
+
+    def _load(object_ids: list[str]) -> dict[str, torch.Tensor]:
+        per_object = []
+        for oid in object_ids:
+            band_entries = {e["band"].lower(): e for e in pixels_by_id[oid]}
+            per_band = []
+            for b in bands:
+                short = b.split("-")[-1].lower()  # "DES-G" -> "g"
+                if short not in band_entries:
+                    raise KeyError(
+                        f"Band {b!r} (looked up as {short!r}) not available for object {oid!r}; "
+                        f"bands present: {sorted(band_entries.keys())}."
+                    )
+                per_band.append(np.asarray(band_entries[short]["flux"], dtype=np.float32))
+            per_object.append(np.stack(per_band, axis=0))  # (n_bands, H, W)
+
+        shapes = {a.shape for a in per_object}
+        if len(shapes) > 1:
+            raise ValueError(
+                f"Inconsistent per-object image shapes in this batch: {shapes}. Expected every "
+                "cutout to share the same (n_bands, H, W)."
+            )
+        pixel_tensor = torch.from_numpy(np.stack(per_object, axis=0))  # (B, n_bands, H, W)
+        return {"pixel_values": pixel_tensor}
+
+    return _load
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--modality", default=None, help="cache only this modality (default: all)")
@@ -67,21 +101,21 @@ def main() -> None:
     manifest = pd.read_parquet(cfg.manifest.parquet)
 
     modality_names = [args.modality] if args.modality else list(cfg.modalities.keys())
+
+    spectra_by_id = None
+    if "spectra" in modality_names:
+        from datasets import load_dataset
+
+        spectra_ds = load_dataset(cfg.sources.spectra.hf_path, split=cfg.sources.spectra.split)
+        spectra_by_id = {row["object_id"]: row for row in spectra_ds}
+
+    image_pixels_by_id = None
     if "image" in modality_names:
-        # See README.md's "Known blocker" section. Once real flux cutouts exist, add an
-        # `_image_batch_loader` returning {"pixel_values": (B, n_bands, H, W) float32} here,
-        # matching _spectra_batch_loader's shape below.
-        raise NotImplementedError(
-            "Image caching is blocked: gapatron/legacy_survey_south_images_captions only "
-            "provides rendered RGB PNGs, not the raw per-band calibrated flux AION's "
-            "LegacySurveyImage expects. Run `--modality spectra` on its own until real grz/griz "
-            "flux cutouts are available."
+        from captioner.data.image_dataset import load_image_flux_pixels
+
+        image_pixels_by_id = load_image_flux_pixels(
+            cfg.sources.image.hf_path, revision=cfg.sources.image.get("revision")
         )
-
-    from datasets import load_dataset
-
-    spectra_ds = load_dataset(cfg.sources.spectra.hf_path, split=cfg.sources.spectra.split)
-    spectra_by_id = {row["object_id"]: row for row in spectra_ds}
 
     out_dir = Path(cfg.get("cache", {}).get("out_dir", "outputs/cache"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -92,6 +126,8 @@ def main() -> None:
 
         if name == "spectra":
             loader = _spectra_batch_loader(spectra_by_id)
+        elif name == "image":
+            loader = _image_batch_loader(image_pixels_by_id, list(modality_cfg.encoder.kwargs.get("bands", [])))
         else:
             raise NotImplementedError(
                 f"No batch loader wired for modality {name!r} yet — add one here when the "

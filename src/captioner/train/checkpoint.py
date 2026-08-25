@@ -4,7 +4,8 @@ outputs/checkpoints/{run}/{tag}/
 ├── middle.pt        # projectors + identity + qformer + adapter — small, keep all of them
 ├── lora/             # stage 2 only
 ├── optimizer.pt
-└── state.json        # step, epoch, rng states, config hash, quantization, tier histogram, git sha
+├── rng_state.pt      # python/numpy/torch RNG state, for reproducible resume
+└── state.json        # step, epoch, config hash, quantization, tier histogram, git sha
 """
 from __future__ import annotations
 
@@ -60,7 +61,6 @@ def save_checkpoint(
     state = {
         "step": step,
         "epoch": epoch,
-        "rng": {k: str(type(v)) for k, v in rng_state().items()},  # human-readable marker
         "config_hash": config_hash(cfg),
         "quantization": cfg.llm.quantization if "llm" in cfg else None,
         "tier_histogram": tier_histogram,

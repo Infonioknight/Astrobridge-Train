@@ -1,75 +1,35 @@
-"""Loader for `gapatron/legacy_survey_south_images_captions` against its *real* shape, confirmed
-by inspecting the repo and one caption JSON directly (see conversation history / commit that
-introduced this file) — not the `datasets.load_dataset`-with-an-`image`-column shape the rest of
-this codebase originally assumed.
+"""Loaders for `gapatron/legacy_survey_south_images_captions`, against two *confirmed* real
+shapes — neither is the `datasets.load_dataset`-with-an-`image`-column shape this codebase
+originally assumed.
 
-What's actually there: raw file pairs, `{object_id}_rgb.png` + `{object_id}_captions.json`,
-~4,821 of them. No `ra`/`dec` (or any coordinate) columns anywhere — only a J2000 sexagesimal
-name buried in `identity_strings_shown_to_model` (e.g. "J0000-0541"), which this module parses.
+**Caption source** (`load_image_captions_table`): raw file pairs, `{object_id}_rgb.png` +
+`{object_id}_captions.json`, 2,410 pairs (the repo lists 4,821 files total: 2,410 pairs + one
+`.gitattributes`). `caption_blind` is generated without literature/external context, i.e.
+grounded only in what the image itself shows, with the dataset's own leak-detection already
+checking for stage contamination — used directly for the image tier in 01_generate_captions.py
+rather than re-derived via our own keyword decomposition. Pixel data here is a rendered RGB PNG
+only, not usable for AION (see aion_image.py) — irrelevant now that real flux exists (below).
 
-Two separable concerns:
-  - Caption text + coordinates: resolved here, need nothing but the JSON files (~90MB total for
-    ~4.8k of them) — `caption_blind` is generated without literature/external context, i.e.
-    grounded only in what the image itself shows, with the dataset's own leak-detection
-    (`leak_flags_per_stage`/`any_leaks_detected`) already checking for stage contamination. This
-    makes it a direct, pre-vetted source for the image tier — see 01_generate_captions.py, which
-    uses it in place of running our own keyword-based decomposition for that tier.
-  - Pixel data: only available here as a rendered RGB PNG, not raw per-band calibrated flux —
-    AION's LegacySurveyImage wants the latter (see aion_image.py). That gap is NOT resolved in
-    this module; pixel loading for 02_cache_embeddings.py stays blocked until real grz/griz flux
-    cutouts are available (see README.md's "Known blocker" note). Nothing here assumes otherwise.
+**Pixel source** (`load_image_flux_identity_table` / `load_image_flux_pixels`):
+`legacy_south_all_images.parquet`, a *separate* file in the same repo — confirmed schema via
+`pyarrow.parquet.ParquetFile(...).schema`. 2,399 rows, each one an ALREADY crossmatched pair: a
+`target_object_id_target` (= AstroBridge-Data's own `object_id` — a direct join key, no
+coordinate crossmatch needed for this subset) plus `object_id_legacy`/`ra_legacy`/`dec_legacy`
+(the Legacy Survey side's own identity, real decimal degrees) plus `image_legacy`: a list of
+per-band structs (`band`, `flux`, `mask`, `ivar`, `psf_fwhm`, `scale`), each `flux`/`mask`/`ivar`
+a 2D (H, W) array. This is real calibrated flux — what AION's LegacySurveyImage actually needs,
+unlike the RGB PNGs above. `rgb_legacy` (bytes/path) is also present but unused, same reason.
+This table's own `ra`/`dec` are what manifest.py actually joins on — real decimal degrees, no
+coordinate parsing needed, unlike the caption source above.
 """
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pandas as pd
 
-from captioner.utils.logging import get_logger
-
-logger = get_logger(__name__)
-
-_JNAME_RE = re.compile(r"^J(\d{4}|\d{6}(?:\.\d+)?)([+-])(\d{4}|\d{6}(?:\.\d+)?)$")
-
-
-def parse_jname(jname: str) -> tuple[float, float]:
-    """Parses a truncated-or-full IAU J2000 sexagesimal name — "J0000-0541" or
-    "J000012.3-054130.2" — into (ra_deg, dec_deg). Raises ValueError rather than guessing on
-    anything that doesn't match the expected pattern.
-    """
-    m = _JNAME_RE.match(jname.strip())
-    if not m:
-        raise ValueError(f"Could not parse J-name coordinate string: {jname!r}")
-    ra_part, sign, dec_part = m.groups()
-
-    ra_int_len = len(ra_part.split(".")[0])
-    if ra_int_len == 4:
-        hh, mm, ss = int(ra_part[0:2]), int(ra_part[2:4]), 0.0
-    else:
-        hh, mm, ss = int(ra_part[0:2]), int(ra_part[2:4]), float(ra_part[4:])
-    ra_deg = 15.0 * (hh + mm / 60 + ss / 3600)
-
-    dec_int_len = len(dec_part.split(".")[0])
-    if dec_int_len == 4:
-        dd, dm, ds = int(dec_part[0:2]), int(dec_part[2:4]), 0.0
-    else:
-        dd, dm, ds = int(dec_part[0:2]), int(dec_part[2:4]), float(dec_part[4:])
-    dec_deg = (1.0 if sign == "+" else -1.0) * (dd + dm / 60 + ds / 3600)
-
-    return ra_deg, dec_deg
-
-
-def _best_jname(identity_strings: list[str]) -> str | None:
-    """`identity_strings_shown_to_model` sometimes carries a sign-less display variant alongside
-    the properly-signed one (e.g. "J0000 0541" next to "J0000-0541" when dec is *negative* —
-    the space-separated form silently drops the sign). Always prefer an entry with an explicit
-    +/- sign; parsing the sign-less one would silently produce the wrong hemisphere for southern
-    objects, which is most of them in a "south" survey.
-    """
-    signed = [s for s in identity_strings if "+" in s or "-" in s]
-    return signed[0] if signed else (identity_strings[0] if identity_strings else None)
+FLUX_PARQUET_FILENAME = "legacy_south_all_images.parquet"
 
 
 def download_caption_jsons(hf_path: str, revision: str | None = None, cache_dir: Path | None = None) -> Path:
@@ -91,10 +51,11 @@ def download_caption_jsons(hf_path: str, revision: str | None = None, cache_dir:
 def load_image_captions_table(
     hf_path: str, revision: str | None = None, cache_dir: Path | None = None
 ) -> pd.DataFrame:
-    """One row per object: object_id, ra, dec, caption_blind/_properties/_literature, and the
-    structured photometry fields gapatron's authors held out of the blind stage (mag_G/R/I/Z,
-    effective_radius_arcsec, ellipticity, position_angle_deg) — usable for claim-tagging the same
-    way AstroBridge's structured fields are (§4).
+    """One row per object: object_id, caption_blind. That's the only pair actually consumed
+    (scripts/01_generate_captions.py looks up captions by object_id — identity/coordinates for
+    the manifest come from the flux parquet instead, see load_image_flux_identity_table above),
+    so that's all this returns; a caption with no `caption_blind` is dropped since there's
+    nothing to caption the image tier with.
     """
     local_dir = download_caption_jsons(hf_path, revision, cache_dir)
     json_paths = sorted(local_dir.rglob("*_captions.json"))
@@ -105,48 +66,62 @@ def load_image_captions_table(
         )
 
     rows = []
-    n_unparseable_coords = 0
     for p in json_paths:
         with open(p) as fh:
             rec = json.load(fh)
+        rows.append({"object_id": rec.get("object_id"), "caption_blind": rec.get("caption_blind")})
 
-        jname = _best_jname(rec.get("identity_strings_shown_to_model", []) or [])
-        ra = dec = None
-        if jname:
-            try:
-                ra, dec = parse_jname(jname)
-            except ValueError:
-                n_unparseable_coords += 1
-        else:
-            n_unparseable_coords += 1
+    df = pd.DataFrame(rows).dropna(subset=["object_id", "caption_blind"]).reset_index(drop=True)
+    return df
 
-        photom = rec.get("photometry_reference_not_shown_to_model", {}) or {}
-        mag = photom.get("mag", {}) or {}
 
-        rows.append(
-            {
-                "object_id": rec.get("object_id"),
-                "ra": ra,
-                "dec": dec,
-                "caption_blind": rec.get("caption_blind"),
-                "caption_properties": rec.get("caption_properties"),
-                "caption_literature": rec.get("caption_literature"),
-                "mag_G": mag.get("G"),
-                "mag_R": mag.get("R"),
-                "mag_I": mag.get("I"),
-                "mag_Z": mag.get("Z"),
-                "effective_radius_arcsec": photom.get("effective_radius_arcsec"),
-                "ellipticity": photom.get("ellipticity"),
-                "position_angle_deg": photom.get("position_angle_deg"),
-            }
-        )
+def _download_flux_parquet(
+    hf_path: str, revision: str | None, filename: str, cache_dir: Path | None
+) -> str:
+    from huggingface_hub import hf_hub_download
 
-    df = pd.DataFrame(rows)
-    if n_unparseable_coords:
-        logger.warning(
-            f"{n_unparseable_coords}/{len(df)} image-dataset objects had no parseable J-name "
-            "coordinate — they'll be dropped before the ra/dec crossmatch in manifest.py."
-        )
-    df = df.dropna(subset=["ra", "dec"]).reset_index(drop=True)
+    return hf_hub_download(
+        repo_id=hf_path,
+        filename=filename,
+        repo_type="dataset",
+        revision=revision,
+        cache_dir=str(cache_dir) if cache_dir else None,
+    )
+
+
+def load_image_flux_identity_table(
+    hf_path: str,
+    revision: str | None = None,
+    filename: str = FLUX_PARQUET_FILENAME,
+    cache_dir: Path | None = None,
+) -> pd.DataFrame:
+    """Lightweight identity columns only from the flux parquet — NOT `image_legacy` (the ~1.7GB
+    nested flux/ivar/mask arrays) or `rgb_legacy`; see load_image_flux_pixels() for those.
+    `object_id` here is `target_object_id_target`, i.e. AstroBridge-Data's own id — this table's
+    rows are already-crossmatched pairs, so this becomes a direct join key in manifest.py rather
+    than needing coordinate-based matching.
+    """
+    local_path = _download_flux_parquet(hf_path, revision, filename, cache_dir)
+    df = pd.read_parquet(
+        local_path,
+        columns=["target_object_id_target", "object_id_legacy", "ra_legacy", "dec_legacy", "_dist_arcsec"],
+    )
+    df = df.rename(columns={"target_object_id_target": "object_id", "ra_legacy": "ra", "dec_legacy": "dec"})
     df["has_image"] = True
     return df
+
+
+def load_image_flux_pixels(
+    hf_path: str,
+    revision: str | None = None,
+    filename: str = FLUX_PARQUET_FILENAME,
+    cache_dir: Path | None = None,
+) -> dict[str, list[dict]]:
+    """object_id (= target_object_id_target, matching load_image_flux_identity_table) -> the
+    per-band list from `image_legacy` (each entry: band/flux/mask/ivar/psf_fwhm/scale), for
+    scripts/02_cache_embeddings.py's batch loader. Loaded once into memory (~1.7GB at today's row
+    count) — reasonable for 2,399 rows; revisit if the crossmatch grows much larger.
+    """
+    local_path = _download_flux_parquet(hf_path, revision, filename, cache_dir)
+    df = pd.read_parquet(local_path, columns=["target_object_id_target", "image_legacy"])
+    return dict(zip(df["target_object_id_target"], df["image_legacy"]))

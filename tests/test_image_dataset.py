@@ -1,47 +1,45 @@
-"""J-name coordinate parsing for the image dataset (data/image_dataset.py) — the one piece of
-real astrometry math in the data pipeline, worth testing directly since a sign error here would
-silently put every southern-hemisphere object in the wrong place for the ra/dec crossmatch.
+"""load_image_captions_table only ever needs to produce (object_id, caption_blind) pairs — see
+its docstring for why the J-name/coordinate parsing that used to live here was removed (identity
+for the manifest join comes from load_image_flux_identity_table instead, real decimal degrees,
+no parsing needed).
 """
 from __future__ import annotations
 
-import pytest
+import json
+from unittest.mock import patch
 
-from captioner.data.image_dataset import _best_jname, parse_jname
-
-
-def test_parses_truncated_jname_negative_dec():
-    ra, dec = parse_jname("J0000-0541")
-    assert ra == pytest.approx(0.0)
-    assert dec == pytest.approx(-5.683333, abs=1e-5)
+from captioner.data.image_dataset import load_image_captions_table
 
 
-def test_parses_truncated_jname_positive_dec():
-    ra, dec = parse_jname("J1200+3000")
-    assert ra == pytest.approx(180.0, abs=1e-5)
-    assert dec == pytest.approx(30.0, abs=1e-5)
+def _write_json(path, **fields):
+    path.write_text(json.dumps(fields))
 
 
-def test_parses_full_precision_jname_with_seconds():
-    ra, dec = parse_jname("J000012.3-054130.2")
-    assert ra == pytest.approx(0.0512500, abs=1e-5)
-    assert dec == pytest.approx(-5.6917222, abs=1e-5)
+def test_rows_missing_caption_blind_are_dropped(tmp_path):
+    _write_json(tmp_path / "a_captions.json", object_id="a", caption_blind="A galaxy.")
+    _write_json(tmp_path / "b_captions.json", object_id="b", caption_blind=None)
+
+    with patch("captioner.data.image_dataset.download_caption_jsons", return_value=tmp_path):
+        df = load_image_captions_table("irrelevant/repo")
+
+    assert list(df["object_id"]) == ["a"]
+    assert df.iloc[0]["caption_blind"] == "A galaxy."
 
 
-def test_rejects_unparseable_string():
-    with pytest.raises(ValueError):
-        parse_jname("not-a-jname")
+def test_rows_missing_object_id_are_dropped(tmp_path):
+    _write_json(tmp_path / "a_captions.json", object_id=None, caption_blind="A galaxy.")
+    _write_json(tmp_path / "b_captions.json", object_id="b", caption_blind="A star.")
+
+    with patch("captioner.data.image_dataset.download_caption_jsons", return_value=tmp_path):
+        df = load_image_captions_table("irrelevant/repo")
+
+    assert list(df["object_id"]) == ["b"]
 
 
-def test_best_jname_prefers_signed_variant():
-    # "J0000 0541" is the sign-less display variant seen alongside the real one in real data —
-    # picking it by accident would silently flip southern objects to the northern hemisphere.
-    assert _best_jname(["J0000 0541", "J0000-0541"]) == "J0000-0541"
-    assert _best_jname(["J0000-0541", "J0000 0541"]) == "J0000-0541"
-
-
-def test_best_jname_falls_back_when_nothing_signed():
-    assert _best_jname(["J0000 0541"]) == "J0000 0541"
-
-
-def test_best_jname_empty_list():
-    assert _best_jname([]) is None
+def test_no_json_files_raises_clearly(tmp_path):
+    with patch("captioner.data.image_dataset.download_caption_jsons", return_value=tmp_path):
+        try:
+            load_image_captions_table("irrelevant/repo")
+            assert False, "expected FileNotFoundError"
+        except FileNotFoundError:
+            pass

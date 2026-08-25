@@ -22,7 +22,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from captioner.data.captions import Caption, Claim, compose_captions, decompose_object, claim_survival_rate
+from captioner.data.captions import (
+    Caption,
+    Claim,
+    compose_captions,
+    decompose_object,
+    claim_survival_rate,
+    _split_sentences,
+)
 from captioner.data.image_dataset import load_image_captions_table
 from captioner.eval.claims import claim_kind_histogram, validate_all
 from captioner.utils.config import load_config
@@ -74,8 +81,6 @@ def main() -> None:
                 available_modalities=available,
                 generator=cfg.captions.generator,
             )
-            from captioner.data.captions import _split_sentences
-
             n_source_sentences += len(_split_sentences(text_row.get("mention_summary") or ""))
             n_surviving += len(claims)
 
@@ -86,7 +91,11 @@ def main() -> None:
             claims = [c for c in claims if c.supporting != frozenset({"image"})]
 
         if "image" in available:
-            blind = image_caption_by_object.get(object_id)
+            # manifest's canonical object_id is AstroBridge-Data's id (from
+            # target_object_id_target); the caption JSON files are keyed by the Legacy Survey's
+            # own naming (object_id_legacy) — different namespace, so look up by that instead.
+            image_lookup_id = row.get("object_id_legacy") or object_id
+            blind = image_caption_by_object.get(image_lookup_id)
             if blind:
                 claims.append(
                     Claim(
