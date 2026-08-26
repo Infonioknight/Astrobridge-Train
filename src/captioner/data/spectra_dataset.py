@@ -16,6 +16,13 @@ Loading each file separately with pandas and `pd.concat`ing sidesteps the cast e
 `pd.concat` fills a column missing from one file with NaN for those rows instead of requiring an
 exact schema match across all files, which is exactly the flexibility `datasets` doesn't give us
 here.
+
+Separately: these files' `spectrum` column is a nested struct (flux/ivar/lsf_sigma/lambda/mask —
+the same shape of thing as the image side's `image_legacy`, which hit a real crash reading via
+plain `pd.read_parquet`: pyarrow's pandas-metadata-driven dtype restoration chokes on a nested
+struct dtype string `numpy.dtype()` can't parse). Reading via `pyarrow.parquet` directly with
+`ignore_metadata=True` avoids that class of failure — see data/image_dataset.py's
+`_read_parquet_columns` for the full explanation; used here defensively for the same reason.
 """
 from __future__ import annotations
 
@@ -24,6 +31,13 @@ from pathlib import Path
 import pandas as pd
 
 SPECTRA_DIR_PREFIX = "observations/spectra/"
+
+
+def _read_parquet(path: str) -> pd.DataFrame:
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path)
+    return table.to_pandas(ignore_metadata=True)
 
 
 def load_spectra_table(
@@ -51,6 +65,6 @@ def load_spectra_table(
             revision=revision,
             cache_dir=str(cache_dir) if cache_dir else None,
         )
-        frames.append(pd.read_parquet(local_path))
+        frames.append(_read_parquet(local_path))
 
     return pd.concat(frames, ignore_index=True, sort=False)

@@ -89,6 +89,23 @@ def _download_flux_parquet(
     )
 
 
+def _read_parquet_columns(path: str, columns: list[str]) -> pd.DataFrame:
+    """Confirmed against a real run: `pd.read_parquet(path, columns=[...])` on this file raises
+    inside pyarrow's pandas-metadata dtype restoration —
+    `ValueError: format number 1 of "nested<band: [string], flux: [...], ...>" is not recognized`
+    — even for `image_legacy`, a column NOT in the requested subset. The file's embedded pandas
+    metadata describes that column's dtype in a form `numpy.dtype()` can't parse, and pyarrow
+    tries to apply it regardless of column projection. We don't need that metadata-driven dtype
+    restoration for these plain identity columns — reading via `pyarrow.parquet` directly and
+    passing `ignore_metadata=True` to `to_pandas()` skips it and lets Arrow's own types drive
+    dtype inference instead, which is what actually avoids the crash.
+    """
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path, columns=columns)
+    return table.to_pandas(ignore_metadata=True)
+
+
 def load_image_flux_identity_table(
     hf_path: str,
     revision: str | None = None,
@@ -102,7 +119,7 @@ def load_image_flux_identity_table(
     than needing coordinate-based matching.
     """
     local_path = _download_flux_parquet(hf_path, revision, filename, cache_dir)
-    df = pd.read_parquet(
+    df = _read_parquet_columns(
         local_path,
         columns=["target_object_id_target", "object_id_legacy", "ra_legacy", "dec_legacy", "_dist_arcsec"],
     )
@@ -123,5 +140,5 @@ def load_image_flux_pixels(
     count) — reasonable for 2,399 rows; revisit if the crossmatch grows much larger.
     """
     local_path = _download_flux_parquet(hf_path, revision, filename, cache_dir)
-    df = pd.read_parquet(local_path, columns=["target_object_id_target", "image_legacy"])
+    df = _read_parquet_columns(local_path, columns=["target_object_id_target", "image_legacy"])
     return dict(zip(df["target_object_id_target"], df["image_legacy"]))
