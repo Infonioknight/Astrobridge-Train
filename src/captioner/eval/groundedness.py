@@ -8,6 +8,7 @@ import random
 
 import torch
 from torch.utils.data import Dataset
+from tqdm.auto import tqdm
 
 from captioner.model.captioner import Captioner
 
@@ -73,7 +74,7 @@ def shuffle_test(
     indices = rng.sample(range(len(dataset)), min(n, len(dataset)))
 
     edit_distances = []
-    for idx in indices:
+    for idx in tqdm(indices, desc=f"shuffle_test[{modality}]"):
         ex = dataset[idx]
         if modality not in ex["shown"]:
             continue
@@ -117,7 +118,7 @@ def ablation_test(model: Captioner, dataset: Dataset, modality: str, tokenizer, 
 
     changed = 0
     total = 0
-    for idx in indices:
+    for idx in tqdm(indices, desc=f"ablation_test[{modality}]"):
         ex = dataset[idx]
         if modality not in ex["shown"]:
             continue

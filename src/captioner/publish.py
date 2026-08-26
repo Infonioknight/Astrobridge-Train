@@ -1,4 +1,4 @@
-"""Pure logic for scripts/07_publish_model.py, kept separate from the HF Hub / real-weights
+"""Pure logic for scripts/06_publish_model.py, kept separate from the HF Hub / real-weights
 orchestration so it's testable without a GPU or network access.
 """
 from __future__ import annotations
