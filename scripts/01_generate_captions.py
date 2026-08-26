@@ -43,9 +43,9 @@ def main() -> None:
     manifest = pd.read_parquet(cfg.manifest.parquet)
 
     # AstroBridge-Data carries the literature-derived fields directly.
-    from datasets import load_dataset
+    from captioner.data.spectra_dataset import load_spectra_table
 
-    spectra_ds = load_dataset(cfg.sources.spectra.hf_path, split=cfg.sources.spectra.split).to_pandas()
+    spectra_ds = load_spectra_table(cfg.sources.spectra.hf_path, revision=cfg.sources.spectra.get("revision"))
     text_by_object = spectra_ds.set_index("object_id")[
         ["mention_summary", "evidence_quotes", "arxiv_id"]
     ].to_dict(orient="index")
@@ -59,6 +59,7 @@ def main() -> None:
     n_source_sentences = 0
     n_surviving = 0
     n_image_from_gapatron = 0
+    n_image_available = 0
     n_no_usable_text = 0
 
     for _, row in manifest.iterrows():
@@ -94,6 +95,7 @@ def main() -> None:
             # manifest's canonical object_id is AstroBridge-Data's id (from
             # target_object_id_target); the caption JSON files are keyed by the Legacy Survey's
             # own naming (object_id_legacy) — different namespace, so look up by that instead.
+            n_image_available += 1
             image_lookup_id = row.get("object_id_legacy") or object_id
             blind = image_caption_by_object.get(image_lookup_id)
             if blind:
@@ -118,6 +120,17 @@ def main() -> None:
     survival_rate = claim_survival_rate(n_source_sentences, n_surviving)
     kind_hist = claim_kind_histogram(all_captions)
 
+    image_caption_match_rate = n_image_from_gapatron / n_image_available if n_image_available else None
+    if image_caption_match_rate is not None and image_caption_match_rate < 0.5:
+        logger.warning(
+            f"Only {image_caption_match_rate:.1%} of image-available objects "
+            f"({n_image_from_gapatron}/{n_image_available}) found a caption_blind match. This is "
+            "the untested assumption that legacy_south_all_images.parquet's object_id_legacy "
+            "shares an id namespace with the caption JSON files' own object_id field — it may "
+            "not hold. Check a few manifest rows' object_id_legacy against real "
+            "*_captions.json filenames before trusting image-tier caption coverage."
+        )
+
     report = {
         "n_objects_processed": len({c.object_id for c in all_captions}),
         "n_captions": len(all_captions),
@@ -125,6 +138,8 @@ def main() -> None:
         "claim_survival_rate": survival_rate,
         "claim_kind_histogram": kind_hist,
         "n_image_captions_from_gapatron_blind": n_image_from_gapatron,
+        "n_image_available": n_image_available,
+        "image_caption_match_rate": image_caption_match_rate,
         "n_objects_with_no_usable_text": n_no_usable_text,
         "generator": cfg.captions.generator,
     }

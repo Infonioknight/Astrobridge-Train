@@ -5,7 +5,8 @@
 sources:
   spectra:
     hf_path: UniverseTBD/AstroBridge-Data
-    split: train
+    revision: null   # not loaded via `datasets.load_dataset` — see data/spectra_dataset.py.
+                      # No `split` here: the repo's multiple parquet files are read directly.
   image:
     hf_path: gapatron/legacy_survey_south_images_captions
     revision: null   # not a `datasets.load_dataset`-shaped repo — see data/image_dataset.py.

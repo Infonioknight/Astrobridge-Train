@@ -104,10 +104,10 @@ def main() -> None:
 
     spectra_by_id = None
     if "spectra" in modality_names:
-        from datasets import load_dataset
+        from captioner.data.spectra_dataset import load_spectra_table
 
-        spectra_ds = load_dataset(cfg.sources.spectra.hf_path, split=cfg.sources.spectra.split)
-        spectra_by_id = {row["object_id"]: row for row in spectra_ds}
+        spectra_df = load_spectra_table(cfg.sources.spectra.hf_path, revision=cfg.sources.spectra.get("revision"))
+        spectra_by_id = spectra_df.set_index("object_id").to_dict(orient="index")
 
     image_pixels_by_id = None
     if "image" in modality_names:

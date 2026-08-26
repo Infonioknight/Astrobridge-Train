@@ -17,10 +17,13 @@ logger = get_logger(__name__)
 
 
 def _load_spectra_table(cfg: DictConfig) -> pd.DataFrame:
-    from datasets import load_dataset
+    """Uses data/spectra_dataset.py, not `datasets.load_dataset` — the latter fails against the
+    real repo's multiple, non-identically-schemaed parquet files (confirmed against a real run,
+    see that module's docstring).
+    """
+    from captioner.data.spectra_dataset import load_spectra_table
 
-    ds = load_dataset(cfg.sources.spectra.hf_path, split=cfg.sources.spectra.split)
-    df = ds.to_pandas()
+    df = load_spectra_table(cfg.sources.spectra.hf_path, revision=cfg.sources.spectra.get("revision"))
     df = df.rename(columns={"ra_spectra": "ra", "dec_spectra": "dec"})
     df["has_spectra"] = True
     return df
