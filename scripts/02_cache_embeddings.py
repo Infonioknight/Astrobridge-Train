@@ -54,28 +54,38 @@ def _spectra_batch_loader(raw_by_id: dict):
     return _load
 
 
+def _canonical_band(label: str) -> str:
+    """Normalizes a band label to its bare letter for matching — "DES-G", "des-g", "G", and "g"
+    must all resolve to the same key. Confirmed against a real run that the source data's own
+    `band` field is a full string like "des-g", not a bare letter — normalizing only the
+    configured label ("DES-G" -> "g") and comparing it against the data's *unnormalized* string
+    ("des-g") is exactly what broke: "g" != "des-g". Both sides must go through this function.
+    """
+    return label.strip().lower().split("-")[-1].split("_")[-1]
+
+
 def _image_batch_loader(pixels_by_id: dict, bands: list[str]):
     """`pixels_by_id`: {object_id: list of {band, flux, mask, ivar, psf_fwhm, scale} dicts} from
     data/image_dataset.py:load_image_flux_pixels — real calibrated per-band flux from
-    legacy_south_all_images.parquet's `image_legacy` field. Bands are matched by name (config's
-    "DES-G" -> "g"), not by list position — position isn't guaranteed order in the source data.
-    Only `flux` is used; `mask`/`ivar`/`psf_fwhm`/`scale` aren't part of AION's LegacySurveyImage
-    constructor (confirmed against a working probe script — see aion_image.py).
+    legacy_south_all_images.parquet's `image_legacy` field. Bands are matched by canonical name
+    (see _canonical_band), not by list position — position isn't guaranteed order in the source
+    data. Only `flux` is used; `mask`/`ivar`/`psf_fwhm`/`scale` aren't part of AION's
+    LegacySurveyImage constructor (confirmed against a working probe script — see aion_image.py).
     """
 
     def _load(object_ids: list[str]) -> dict[str, torch.Tensor]:
         per_object = []
         for oid in object_ids:
-            band_entries = {e["band"].lower(): e for e in pixels_by_id[oid]}
+            band_entries = {_canonical_band(e["band"]): e for e in pixels_by_id[oid]}
             per_band = []
             for b in bands:
-                short = b.split("-")[-1].lower()  # "DES-G" -> "g"
-                if short not in band_entries:
+                key = _canonical_band(b)
+                if key not in band_entries:
                     raise KeyError(
-                        f"Band {b!r} (looked up as {short!r}) not available for object {oid!r}; "
+                        f"Band {b!r} (canonicalized to {key!r}) not available for object {oid!r}; "
                         f"bands present: {sorted(band_entries.keys())}."
                     )
-                per_band.append(np.asarray(band_entries[short]["flux"], dtype=np.float32))
+                per_band.append(np.asarray(band_entries[key]["flux"], dtype=np.float32))
             per_object.append(np.stack(per_band, axis=0))  # (n_bands, H, W)
 
         shapes = {a.shape for a in per_object}
