@@ -16,6 +16,7 @@ from omegaconf import DictConfig
 
 from captioner.encoders.registry import build_encoder
 from captioner.model.captioner import Captioner, FusionStack
+from captioner.publish import filter_missing_lora_keys
 from captioner.train.stage1 import build_llm, get_llm_hidden_size
 from captioner.utils.prompt import human_readable_subset
 
@@ -26,12 +27,33 @@ def load_inference_model(
     """`checkpoint_dir` needs middle.pt (e.g. outputs/checkpoints/stage2/best, or stage1's).
     `lora_dir` is the matching lora/ subfolder — pass None for a stage-1-only checkpoint.
     Only builds encoders for modalities actually requested at call time — see generate_caption.
+
+    `lora_dir` holds this repo's own checkpoint format (a raw filtered state_dict at
+    lora/adapter.pt — see train/checkpoint.py's save_checkpoint), NOT PEFT's own
+    save_pretrained format (adapter_config.json + safetensors). `PeftModel.from_pretrained`
+    expects the latter, so the LoRA config is reconstructed here from configs/stage2.yaml and
+    the state dict loaded manually — same approach scripts/06_publish_model.py uses to convert
+    into the standard format for publishing.
     """
     llm, tokenizer = build_llm(cfg)
     if lora_dir is not None:
-        from peft import PeftModel
+        from peft import LoraConfig, get_peft_model
 
-        llm = PeftModel.from_pretrained(llm, str(lora_dir))
+        lora_config = LoraConfig(
+            r=int(cfg.lora.r), lora_alpha=int(cfg.lora.alpha), lora_dropout=float(cfg.lora.dropout),
+            target_modules=list(cfg.lora.target_modules), task_type="CAUSAL_LM",
+        )
+        llm = get_peft_model(llm, lora_config)
+        lora_state = torch.load(Path(lora_dir) / "adapter.pt", map_location="cpu", weights_only=False)
+        missing, _unexpected = llm.load_state_dict(lora_state, strict=False)
+        real_missing = filter_missing_lora_keys(missing)
+        if real_missing:
+            raise RuntimeError(
+                f"LoRA state from {Path(lora_dir) / 'adapter.pt'} didn't fully load onto a "
+                f"freshly LoRA-wrapped {cfg.llm.name} — missing keys: {real_missing[:10]}. "
+                "This means either the checkpoint doesn't match configs/stage2.yaml's current "
+                "lora.* settings, or the checkpoint is corrupt."
+            )
     d_llm = get_llm_hidden_size(llm)
 
     out_dims = {n: int(c.out_dim) for n, c in cfg.modalities.items()}
