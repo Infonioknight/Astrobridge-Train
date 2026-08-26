@@ -3,6 +3,14 @@ step 6 acceptance) — every `save_every_n_steps` we write a full checkpoint (mi
 optimizer.pt, rng_state.pt, state.json) and `resume` reloads all of it, including RNG state, so
 the resumed data order is reproducible.
 
+Loss history is durable, not just printed: every optimizer step's train loss is appended as a
+JSON line (`split="train"`) to `{run_dir}/metrics.jsonl` (main process only), independent of
+checkpoint cadence, and every epoch additionally gets one `split="train_epoch"` (mean over that
+epoch's steps) and one `split="val"` row sharing the same `epoch` value — read it with
+`pd.read_json(path, lines=True)` and filter to those two splits for a clean one-point-per-epoch
+curve, or plot the raw `split="train"` rows for per-step granularity. Durable even if the console
+output that ran alongside it is gone.
+
 Single-node multi-GPU (DDP, via `accelerate`) is supported directly — see
 `captioner/README.md`'s cluster section. `accelerator.accumulate(model)` handles gradient
 accumulation; only the main process writes checkpoints and logs, gated by
@@ -18,6 +26,8 @@ full bf16 27B replica plus activations.
 """
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -33,6 +43,17 @@ from captioner.utils.logging import get_logger
 from captioner.utils.seeding import load_rng_state
 
 logger = get_logger(__name__)
+
+
+def _append_metric(run_dir: Path, record: dict) -> None:
+    """Append one JSON line to `run_dir/metrics.jsonl` — the only durable record of loss values;
+    `state.json` in each checkpoint tracks step/epoch/config but not loss history, and console
+    output (tqdm/accelerator.print) is lost once the terminal scrolls or the session ends.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    record = {"time": time.time(), **record}
+    with open(run_dir / "metrics.jsonl", "a") as f:
+        f.write(json.dumps(record) + "\n")
 
 
 def find_latest_checkpoint(run_dir: Path) -> Path | None:
@@ -111,6 +132,8 @@ def run_training(
         pbar = tqdm(
             train_loader, desc=f"epoch {epoch}", disable=not accelerator.is_main_process, leave=False
         )
+        epoch_loss_sum = 0.0
+        epoch_loss_count = 0
         for batch in pbar:
             with accelerator.accumulate(model):
                 out = model(
@@ -129,14 +152,26 @@ def run_training(
 
             if accelerator.sync_gradients:
                 step += 1
-                pbar.set_postfix(step=step, loss=f"{out.loss.item():.4f}")
+                loss_value = out.loss.item()
+                epoch_loss_sum += loss_value
+                epoch_loss_count += 1
+                pbar.set_postfix(step=step, loss=f"{loss_value:.4f}")
+                if accelerator.is_main_process:
+                    _append_metric(run_dir, {"split": "train", "epoch": epoch, "step": step, "loss": loss_value})
                 save_every = cfg.get("checkpoint", {}).get("save_every_n_steps", 500)
                 if step % save_every == 0:
-                    accelerator.print(f"step={step} loss={out.loss.item():.4f} — checkpointing")
+                    accelerator.print(f"step={step} loss={loss_value:.4f} — checkpointing")
                     _save(accelerator, model, optimizer, step, epoch, cfg, run_dir / f"step_{step}", tier_histogram, lora_state_fn)
 
+        train_loss = epoch_loss_sum / max(1, epoch_loss_count)
         val_loss = evaluate_loss(accelerator, model, val_loader)
-        accelerator.print(f"epoch={epoch} step={step} val_loss={val_loss:.4f}")
+        accelerator.print(f"epoch={epoch} step={step} train_loss={train_loss:.4f} val_loss={val_loss:.4f}")
+        if accelerator.is_main_process:
+            # One `train_epoch`/`val` pair per epoch, on top of the per-step `train` records above —
+            # filtering metrics.jsonl to split=="train_epoch" or split=="val" gives a clean,
+            # one-point-per-epoch series to plot without needing to average the per-step rows first.
+            _append_metric(run_dir, {"split": "train_epoch", "epoch": epoch, "step": step, "loss": train_loss})
+            _append_metric(run_dir, {"split": "val", "epoch": epoch, "step": step, "loss": val_loss})
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
