@@ -45,10 +45,12 @@ def _cosine_with_warmup(optimizer, total_steps: int, warmup_frac: float):
 
 
 def build_llm(model_cfg: DictConfig):
+    logger.info(f"Loading tokenizer for {model_cfg.llm.name} ...")
     trust_remote_code = bool(model_cfg.llm.get("trust_remote_code", False))
     tokenizer = AutoTokenizer.from_pretrained(model_cfg.llm.name, trust_remote_code=trust_remote_code)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    logger.info("Tokenizer loaded.")
 
     quant_config = None
     if model_cfg.llm.quantization == "nf4":
@@ -58,6 +60,11 @@ def build_llm(model_cfg: DictConfig):
             load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16
         )
 
+    logger.info(
+        f"Loading {model_cfg.llm.name} weights (dtype={model_cfg.llm.dtype}, "
+        f"quantization={model_cfg.llm.quantization}) — for a model this size, this can take "
+        "several minutes with no further output until it's done; that's normal, not stuck."
+    )
     load_kwargs = dict(
         torch_dtype=torch.bfloat16 if model_cfg.llm.dtype == "bfloat16" else torch.float32,
         attn_implementation=model_cfg.llm.attn_impl,
@@ -85,6 +92,8 @@ def build_llm(model_cfg: DictConfig):
 
         llm = AutoModel.from_pretrained(model_cfg.llm.name, **load_kwargs)
 
+    n_params = sum(p.numel() for p in llm.parameters())
+    logger.info(f"LLM weights loaded ({n_params:,} parameters). Freezing and continuing.")
     for p in llm.parameters():
         p.requires_grad = False
     return llm, tokenizer
@@ -135,6 +144,7 @@ def run_stage1(cfg: DictConfig) -> None:
     cache_root = Path(cfg.get("cache", {}).get("out_dir", "outputs/cache"))
     train_ds = CaptionerDataset(manifest, captions, cfg, cache_root, "train", tokenizer, cfg.prompt.template)
     val_ds = CaptionerDataset(manifest, captions, cfg, cache_root, "val", tokenizer, cfg.prompt.template)
+    logger.info(f"Stage 1 datasets ready: train={len(train_ds)} val={len(val_ds)}")
 
     collate_fn = make_collate_fn(train_ds.modality_names, out_dims, max_tokens, tokenizer.pad_token_id)
     micro_bs = int(cfg.micro_batch_size)

@@ -25,6 +25,7 @@ import torch
 from accelerate import Accelerator
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from captioner.model.captioner import Captioner
 from captioner.train.checkpoint import load_checkpoint, save_checkpoint
@@ -100,9 +101,17 @@ def run_training(
         start_epoch = state["epoch"]
         accelerator.print(f"Resumed from {latest} at step={step} epoch={start_epoch}")
 
+    accelerator.print(f"Starting training: epochs={epochs}, batches/epoch={len(train_loader)}")
+
     for epoch in range(start_epoch, epochs):
         model.train()
-        for batch in train_loader:
+        # `disable=` rather than skipping the wrap entirely: on non-main ranks tqdm still needs to
+        # exist as a plain no-op iterator wrapper, since the `for batch in ...` below is unchanged
+        # either way — only its console output is suppressed, avoiding 4 interleaved bars in DDP.
+        pbar = tqdm(
+            train_loader, desc=f"epoch {epoch}", disable=not accelerator.is_main_process, leave=False
+        )
+        for batch in pbar:
             with accelerator.accumulate(model):
                 out = model(
                     batch["modality_batch"],
@@ -120,8 +129,10 @@ def run_training(
 
             if accelerator.sync_gradients:
                 step += 1
+                pbar.set_postfix(step=step, loss=f"{out.loss.item():.4f}")
                 save_every = cfg.get("checkpoint", {}).get("save_every_n_steps", 500)
                 if step % save_every == 0:
+                    accelerator.print(f"step={step} loss={out.loss.item():.4f} — checkpointing")
                     _save(accelerator, model, optimizer, step, epoch, cfg, run_dir / f"step_{step}", tier_histogram, lora_state_fn)
 
         val_loss = evaluate_loss(accelerator, model, val_loader)

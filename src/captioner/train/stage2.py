@@ -77,7 +77,9 @@ def run_stage2(cfg: DictConfig) -> None:
         projector_hidden_mult=int(cfg.projector.hidden_mult),
         projector_dropout=float(cfg.projector.dropout),
     )
+    logger.info(f"Loading stage 1 fusion stack checkpoint from {cfg.init_from} ...")
     fusion_stack.load_state_dict(torch.load(cfg.init_from, map_location="cpu", weights_only=False))
+    logger.info("Stage 1 checkpoint loaded.")
 
     for p in fusion_stack.parameters():
         p.requires_grad = True
@@ -87,6 +89,7 @@ def run_stage2(cfg: DictConfig) -> None:
     cache_root = Path(cfg.get("cache", {}).get("out_dir", "outputs/cache"))
     train_ds = CaptionerDataset(manifest, captions, cfg, cache_root, "train", tokenizer, cfg.prompt.template)
     val_ds = CaptionerDataset(manifest, captions, cfg, cache_root, "val", tokenizer, cfg.prompt.template)
+    logger.info(f"Stage 2 datasets ready: train={len(train_ds)} val={len(val_ds)}")
 
     collate_fn = make_collate_fn(train_ds.modality_names, out_dims, max_tokens, tokenizer.pad_token_id)
     micro_bs = int(cfg.micro_batch_size)
