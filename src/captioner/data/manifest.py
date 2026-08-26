@@ -60,9 +60,29 @@ def _crossmatch_coords(left: pd.DataFrame, right: pd.DataFrame, radius_arcsec: f
     return matched
 
 
+def _assert_unique_object_id(df: pd.DataFrame, label: str) -> None:
+    """A join key that isn't actually unique silently turns `pd.merge` into a cross-product for
+    every duplicated key, inflating row counts in a way that's easy to miss (a real failure mode
+    hit in production — see spectra_dataset.py's deduplication). Loaders are expected to
+    deduplicate themselves; this is the last-resort net that fails loudly instead of letting a
+    future data source quietly corrupt the manifest the same way.
+    """
+    if "object_id" not in df.columns:
+        return
+    dupes = df["object_id"][df["object_id"].duplicated(keep=False)]
+    if len(dupes) > 0:
+        raise ValueError(
+            f"{label} has {dupes.nunique()} duplicated object_id values ({len(dupes)} rows) — "
+            "the loader for this table should have deduplicated before returning. Merging with "
+            "a non-unique key would silently inflate the manifest's row count."
+        )
+
+
 def build_manifest(cfg: DictConfig) -> tuple[pd.DataFrame, dict]:
     spectra_df = _load_spectra_table(cfg)
     image_df = _load_image_table(cfg)
+    _assert_unique_object_id(spectra_df, "spectra table")
+    _assert_unique_object_id(image_df, "image table")
 
     join_key = cfg.join.key
     have_key_both = join_key in spectra_df.columns and join_key in image_df.columns
