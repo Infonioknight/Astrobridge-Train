@@ -54,6 +54,61 @@ def _spectra_batch_loader(raw_by_id: dict):
     return _load
 
 
+def _flux_to_array(raw_flux, object_id: str, band: str) -> np.ndarray:
+    """Converts one band's `flux` field to a clean (H, W) float32 array. Confirmed against a
+    real run: `np.asarray(raw_flux, dtype=np.float32)` can fail with
+    "setting an array element with a sequence" — meaning `raw_flux` (a list of rows) isn't a
+    uniform rectangle. The most likely, well-understood cause for a real image cutout is a row
+    near a survey/mosaic edge coming through as `None` (missing) rather than a properly-shaped
+    row of NaNs — exactly what `mask`/`ivar` exist elsewhere in this same data to flag. Recovered
+    by filling `None` rows with NaN at the modal row width. Anything else (rows that exist but
+    genuinely disagree on width) is NOT auto-fixed — that could silently corrupt real flux
+    values — it raises with the actual row-length breakdown instead of numpy's opaque error.
+    """
+    # Validate row-by-row explicitly, rather than trying np.asarray(...) first and reacting to
+    # failure — numpy silently converts a top-level `None` to NaN for a float dtype even when
+    # the overall structure isn't the 2D grid we need (e.g. `np.asarray([None, None],
+    # dtype=float32)` "succeeds" as a 1D array), which would let an all-missing row slip through
+    # undetected instead of being caught below.
+    rows = list(raw_flux)
+    lengths = []
+    for r in rows:
+        try:
+            lengths.append(len(r))
+        except TypeError:
+            lengths.append(None)  # a None/scalar row — treated as "missing", not corrupt data
+
+    real_lengths = sorted({length for length in lengths if length is not None})
+    if not real_lengths:
+        raise ValueError(
+            f"flux for object={object_id!r} band={band!r} has no usable rows at all — every row "
+            f"is None/scalar (row types: {[type(r).__name__ for r in rows]})."
+        )
+    if len(real_lengths) > 1:
+        raise ValueError(
+            f"flux for object={object_id!r} band={band!r} has rows of genuinely different "
+            f"widths {real_lengths} — not just missing rows. Row-by-row lengths: {lengths}. "
+            "This needs a real look before auto-fixing (padding/cropping could silently distort "
+            "the image), so it's not attempted automatically."
+        )
+
+    width = real_lengths[0]
+    n_missing = sum(1 for length in lengths if length is None)
+    if n_missing == 0:
+        return np.asarray(rows, dtype=np.float32)
+
+    logger.warning(
+        f"object={object_id!r} band={band!r}: {n_missing}/{len(rows)} rows were None/missing "
+        f"— filled with NaN at width {width}. If this is common, it's worth checking whether "
+        "AION's LegacySurveyImage tolerates NaN input or needs these masked differently."
+    )
+    fixed_rows = [
+        np.asarray(r, dtype=np.float32) if length is not None else np.full(width, np.nan, dtype=np.float32)
+        for r, length in zip(rows, lengths)
+    ]
+    return np.stack(fixed_rows, axis=0)
+
+
 def _canonical_band(label: str) -> str:
     """Normalizes a band label to its bare letter for matching — "DES-G", "des-g", "G", and "g"
     must all resolve to the same key. Confirmed against a real run that the source data's own
@@ -85,7 +140,7 @@ def _image_batch_loader(pixels_by_id: dict, bands: list[str]):
                         f"Band {b!r} (canonicalized to {key!r}) not available for object {oid!r}; "
                         f"bands present: {sorted(band_entries.keys())}."
                     )
-                per_band.append(np.asarray(band_entries[key]["flux"], dtype=np.float32))
+                per_band.append(_flux_to_array(band_entries[key]["flux"], oid, key))
             per_object.append(np.stack(per_band, axis=0))  # (n_bands, H, W)
 
         shapes = {a.shape for a in per_object}

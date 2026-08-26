@@ -87,3 +87,34 @@ def test_inconsistent_shapes_across_batch_raises():
     loader = cache_script._image_batch_loader(pixels_by_id, ["DES-G", "DES-R", "DES-Z"])
     with pytest.raises(ValueError, match="Inconsistent"):
         loader(["obj1", "obj2"])
+
+
+class TestFluxToArray:
+    """Confirmed against a real run: np.asarray(flux, dtype=float32) can fail with 'setting an
+    array element with a sequence' when a row near a survey/mosaic edge comes through as None
+    instead of a properly-shaped row — see _flux_to_array's docstring for the full reasoning.
+    """
+
+    def test_clean_rectangular_flux_unaffected(self):
+        arr = cache_script._flux_to_array([[1.0, 2.0], [3.0, 4.0]], "obj1", "g")
+        assert arr.shape == (2, 2)
+        assert arr.dtype == np.float32
+        assert arr.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+
+    def test_none_rows_filled_with_nan(self):
+        arr = cache_script._flux_to_array([[1.0, 2.0, 3.0], None, [4.0, 5.0, 6.0]], "obj2", "g")
+        assert arr.shape == (3, 3)
+        assert np.isnan(arr[1]).all()
+        assert not np.isnan(arr[0]).any() and not np.isnan(arr[2]).any()
+
+    def test_genuinely_different_row_widths_raises_not_silently_padded(self):
+        # Real, non-None rows disagreeing on width must never be auto-padded/cropped — that
+        # could silently distort the image — it must raise instead.
+        with pytest.raises(ValueError, match="genuinely different"):
+            cache_script._flux_to_array([[1.0, 2.0, 3.0], [4.0, 5.0]], "obj3", "g")
+
+    def test_all_rows_none_raises_clearly(self):
+        # numpy silently converts a top-level None to NaN even for a malformed 1D result — this
+        # must be caught explicitly rather than let a wrongly-shaped array through unnoticed.
+        with pytest.raises(ValueError, match="no usable rows at all"):
+            cache_script._flux_to_array([None, None], "obj4", "g")
