@@ -12,7 +12,7 @@ pip install -e ".[dev]"
 ## 2. Log into Hugging Face
 
 ```bash
-huggingface-cli login
+hf auth login
 ```
 
 Paste a token from https://huggingface.co/settings/tokens when asked. Then request access on
@@ -36,7 +36,7 @@ before moving on, don't skip ahead.
 make test
 ```
 
-Should finish with `19 passed`. Runs in seconds, no GPU needed. **If this isn't green, stop and
+Should finish with `73 passed`. Runs in seconds, no GPU needed. **If this isn't green, stop and
 get help — nothing below this is trustworthy until it is.**
 
 ## 5. Build the data (no GPU needed)
@@ -50,10 +50,33 @@ make captions
 
 ```bash
 make cache                              # one-time: encode images + spectra
-make stage1                             # the actual training run
+make stage1                             # trains the fusion stack (LLM frozen)
 make eval CKPT=outputs/checkpoints/stage1/best   # sanity-check the result
-make stage2                             # only run this if step above looks good
+make stage2                             # only run this if step above looks good — LoRA on the LLM
+make eval CKPT=outputs/checkpoints/stage2/best   # sanity-check stage 2 too
 ```
+
+## Sharing the trained model
+
+```bash
+make publish CKPT=outputs/checkpoints/stage2/best REPO=your-org/astrobridge-captioner-v1
+```
+
+Pushes the LoRA adapter (converted to PEFT's standard format) + fusion stack + a model card to a
+private HF Hub repo, so anyone on the team can pull it without needing this repo's checkpoint
+files directly.
+
+## Trying it out on a new object
+
+```bash
+python scripts/07_infer.py --checkpoint-dir outputs/checkpoints/stage2/best \
+    --lora-dir outputs/checkpoints/stage2/best/lora \
+    --image-npy path/to/cutout.npy --question "What kind of object is this?"
+```
+
+Runs the encoders live on a brand-new image/spectrum (not part of the manifest/cache) and asks
+the model your own free-form question — see `scripts/07_infer.py`'s docstring for the exact
+input format, and `test_subjects/` for 5 real image/spectrum examples to try it on immediately.
 
 ## Multiple GPUs on one machine?
 

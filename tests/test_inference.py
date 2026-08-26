@@ -134,6 +134,61 @@ def test_no_question_falls_back_to_template():
     assert tokenizer.seen_prompts == ["Describe using only an image."]
 
 
+def test_fewer_raw_tokens_than_max_tokens_are_padded_and_masked():
+    """Confirmed real: AION's actual token count depends on input size (image pixel dims /
+    spectrum length), not just num_encoder_tokens — a 384x384 image or ~7800-sample spectrum can
+    both come back with fewer raw tokens than configured max_tokens. Must pad + mask, not raise.
+    """
+    model, _default_encoders, out_dims, max_tokens = _make_model_and_encoders()
+    encoders = {"image": _FakeEncoder(2, 4), "spectra": _FakeEncoder(3, 4)}  # image: 2 < T_m=3
+
+    captured = {}
+    original_forward = model.fusion_stack.forward
+
+    def _spy(modality_batch):
+        captured["batch"] = modality_batch
+        return original_forward(modality_batch)
+
+    model.fusion_stack.forward = _spy
+
+    generate_caption(
+        model, _FakeTokenizer(), encoders, out_dims, max_tokens,
+        "Describe using only {modalities}.", "cpu",
+        raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
+        max_new_tokens=3,
+    )
+
+    image_batch = captured["batch"]["image"]
+    assert image_batch["tokens"].shape == (1, 3, 4)
+    assert not image_batch["mask"][0, :2].any()  # first 2 (real) positions unmasked
+    assert image_batch["mask"][0, 2]  # 3rd (padding) position masked
+
+
+def test_more_raw_tokens_than_max_tokens_are_truncated():
+    model, _default_encoders, out_dims, max_tokens = _make_model_and_encoders()
+    encoders = {"image": _FakeEncoder(5, 4), "spectra": _FakeEncoder(3, 4)}  # image: 5 > T_m=3
+
+    captured = {}
+    original_forward = model.fusion_stack.forward
+
+    def _spy(modality_batch):
+        captured["batch"] = modality_batch
+        return original_forward(modality_batch)
+
+    model.fusion_stack.forward = _spy
+
+    generate_caption(
+        model, _FakeTokenizer(), encoders, out_dims, max_tokens,
+        "Describe using only {modalities}.", "cpu",
+        raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
+        max_new_tokens=3,
+    )
+
+    image_batch = captured["batch"]["image"]
+    assert image_batch["tokens"].shape == (1, 3, 4)
+    assert not image_batch["mask"].any()  # fully real, none padded
+
+
 def test_absent_modality_gets_true_mask_not_zero_content_only():
     """The absent modality's mask must be all-True (excluded), matching §6's rule that absence
     is real exclusion, never an unmasked zero-vector placeholder.
