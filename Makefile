@@ -3,7 +3,7 @@
 # Override on the command line, e.g.: make stage1 ACCELERATE_CONFIG=configs/my_cluster.yaml
 ACCELERATE_CONFIG ?= configs/accelerate_ddp.yaml
 
-.PHONY: test manifest captions cache stage1 eval stage2 install check-access
+.PHONY: test manifest captions cache stage1 eval stage2 install check-access coverage publish
 
 install:
 	pip install -e ".[dev]"
@@ -23,6 +23,9 @@ captions:
 cache:
 	python scripts/02_cache_embeddings.py
 
+coverage:
+	python scripts/06_coverage_report.py
+
 stage1:
 	accelerate launch --config_file $(ACCELERATE_CONFIG) scripts/03_train_stage1.py
 
@@ -32,3 +35,8 @@ eval:
 
 stage2:
 	accelerate launch --config_file $(ACCELERATE_CONFIG) scripts/05_train_stage2.py
+
+publish:
+	@test -n "$(CKPT)" || (echo "Usage: make publish CKPT=outputs/checkpoints/stage2/best REPO=your-org/astrobridge-captioner-v1" && exit 1)
+	@test -n "$(REPO)" || (echo "Usage: make publish CKPT=outputs/checkpoints/stage2/best REPO=your-org/astrobridge-captioner-v1" && exit 1)
+	python scripts/07_publish_model.py --checkpoint-dir $(CKPT) --repo-id $(REPO)
