@@ -111,19 +111,20 @@ def generate_caption(
     modality_batch: dict[str, dict[str, torch.Tensor]] = {}
     for name, out_dim in modality_out_dims.items():
         T_m = modality_max_tokens[name]
+        tokens = torch.zeros((1, T_m, out_dim), dtype=torch.float32, device=device)
+        mask = torch.ones((1, T_m), dtype=torch.bool, device=device)  # True = pad/absent by default
         if name in raw_inputs:
-            tokens = encoders[name].encode(raw_inputs[name]).to(torch.float32)  # (1, T_m, out_dim)
-            if tokens.shape[1] != T_m:
-                raise ValueError(
-                    f"{name} encoder returned {tokens.shape[1]} tokens, expected {T_m} "
-                    "(modalities.yaml's max_tokens should equal num_encoder_tokens the encoder "
-                    "was built with — see encoders/registry.py's build_encoder)."
-                )
-            mask = torch.zeros((1, T_m), dtype=torch.bool, device=device)
-        else:
-            tokens = torch.zeros((1, T_m, out_dim), dtype=torch.float32, device=device)
-            mask = torch.ones((1, T_m), dtype=torch.bool, device=device)
-        modality_batch[name] = {"tokens": tokens.to(device), "mask": mask}
+            # AION's real token count depends on the actual input (image pixel dims / spectrum
+            # length), not just the `num_encoder_tokens` the encoder was built with — confirmed
+            # real, not a bug in the encoder: a 384x384 image or a ~7800-sample spectrum can both
+            # produce fewer raw tokens than max_tokens. data/collate.py already pads/truncates to
+            # max_tokens per-object during training for exactly this reason; mirror that here
+            # instead of requiring an exact match (which training never assumed either).
+            raw_tokens = encoders[name].encode(raw_inputs[name]).to(torch.float32)  # (1, T_raw, out_dim)
+            n = min(raw_tokens.shape[1], T_m)
+            tokens[:, :n] = raw_tokens[:, :n].to(device)
+            mask[:, :n] = False
+        modality_batch[name] = {"tokens": tokens, "mask": mask}
 
     prompt_text = question if question is not None else prompt_template.format(modalities=human_readable_subset(shown))
     prompt_ids = tokenizer(prompt_text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(device)
