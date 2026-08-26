@@ -28,23 +28,37 @@ def _edit_distance(a: str, b: str) -> int:
 
 @torch.no_grad()
 def _generate_caption(model: Captioner, tokenizer, batch: dict, device: str, max_new_tokens: int = 64) -> list[str]:
+    """FusionStack is plain nn.Module fp32 by construction; the LLM is loaded in bf16 (see
+    train/stage1.py's build_llm). During training this mismatch is invisible —
+    accelerator.prepare() wraps every forward in an autocast(bf16) context, per
+    configs/accelerate_ddp.yaml's mixed_precision: bf16, which silently reconciles fp32-vs-bf16
+    matmuls at every layer boundary (modality tokens -> projectors, fusion output -> LLM, etc).
+    There's no Accelerator here, so without this same autocast, torch.cat([prefix, prompt_embeds])
+    upcast-promotes to fp32 and generate() then feeds fp32 activations into the LLM's bf16
+    weights — confirmed real: "RuntimeError: expected mat1 and mat2 to have the same dtype, but
+    got: float != c10::BFloat16" inside Qwen3.5's linear_attn layer. Reproducing the exact same
+    autocast context training used (rather than manually casting weights at one specific layer)
+    is what actually fixes every boundary, not just the one that happened to error first.
+    """
     model.eval()
     fusion_stack = model.fusion_stack
     modality_batch = {k: {kk: vv.to(device) for kk, vv in v.items()} for k, v in batch["modality_batch"].items()}
     prompt_ids = batch["prompt_ids"].to(device)
 
-    prefix = fusion_stack(modality_batch)
-    embed_fn = model.llm.get_input_embeddings()
-    prompt_embeds = embed_fn(prompt_ids)
-    inputs_embeds = torch.cat([prefix, prompt_embeds], dim=1)
-    attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=device)
+    device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        prefix = fusion_stack(modality_batch)
+        embed_fn = model.llm.get_input_embeddings()
+        prompt_embeds = embed_fn(prompt_ids)
+        inputs_embeds = torch.cat([prefix, prompt_embeds], dim=1)
+        attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=device)
 
-    gen = model.llm.generate(
-        inputs_embeds=inputs_embeds,
-        attention_mask=attention_mask,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-    )
+        gen = model.llm.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+        )
     return tokenizer.batch_decode(gen, skip_special_tokens=True)
 
 
