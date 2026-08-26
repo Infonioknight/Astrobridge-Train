@@ -5,7 +5,13 @@ description = "n-modality captioner: shared Q-Former + LoRA-adapted LLM decoder"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.2",
-    "transformers>=4.42",
+    # Qwen3.5-9B's own config.json declares transformers_version "4.57.0.dev0" (a pre-release
+    # build, confirmed via a real check against the hosted config) — model_type "qwen3_5" almost
+    # certainly isn't recognized by transformers 4.42. This floor is a best-effort guess at the
+    # first stable release likely to include it; if `AutoConfig.from_pretrained` raises an
+    # unrecognized-model-type error, install transformers from the `main` branch on GitHub
+    # instead of from PyPI (`pip install git+https://github.com/huggingface/transformers`).
+    "transformers>=4.57",
     "peft>=0.11",
     "accelerate>=0.30",
     "huggingface_hub>=0.23",

@@ -131,8 +131,8 @@ def build_manifest(cfg: DictConfig) -> tuple[pd.DataFrame, dict]:
         merged_key = pd.concat([joint, spec_only, image_only], ignore_index=True, sort=False)
         join_method = f"coord@{cfg.join.fallback_radius_arcsec}arcsec"
 
-    merged_key["has_spectra"] = merged_key.get("has_spectra", False).fillna(False).astype(bool)
-    merged_key["has_image"] = merged_key.get("has_image", False).fillna(False).astype(bool)
+    merged_key["has_spectra"] = merged_key.get("has_spectra", False).fillna(False).infer_objects(copy=False).astype(bool)
+    merged_key["has_image"] = merged_key.get("has_image", False).fillna(False).infer_objects(copy=False).astype(bool)
 
     def tier(row) -> str:
         if row["has_spectra"] and row["has_image"]:

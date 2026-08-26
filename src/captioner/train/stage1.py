@@ -58,13 +58,33 @@ def build_llm(model_cfg: DictConfig):
             load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16
         )
 
-    llm = AutoModelForCausalLM.from_pretrained(
-        model_cfg.llm.name,
+    load_kwargs = dict(
         torch_dtype=torch.bfloat16 if model_cfg.llm.dtype == "bfloat16" else torch.float32,
         attn_implementation=model_cfg.llm.attn_impl,
         quantization_config=quant_config,
         trust_remote_code=trust_remote_code,
     )
+    try:
+        llm = AutoModelForCausalLM.from_pretrained(model_cfg.llm.name, **load_kwargs)
+    except (ValueError, KeyError) as e:
+        # Qwen3.5-9B's real config (confirmed via a live check) carries a `vision_config` —
+        # architecture "Qwen3_5ForConditionalGeneration" is a native vision-language model, not
+        # a plain causal LM, so AutoModelForCausalLM may not have it registered even once
+        # transformers recognizes the "qwen3_5" model_type at all. This build never uses Qwen's
+        # own vision pathway (LegacySurveyImage/DESISpectrum go through AION, not here) — a
+        # generic AutoModel load still exposes .get_input_embeddings() and forward(inputs_embeds=
+        # ...), which is all Captioner.forward actually needs.
+        logger.warning(
+            f"AutoModelForCausalLM.from_pretrained({model_cfg.llm.name!r}) failed "
+            f"({type(e).__name__}: {e}); retrying with AutoModel (this architecture may be "
+            "registered as vision-language, not causal-LM, but this build never uses its "
+            "native vision pathway so a generic load should still work for our use — verify the "
+            "resulting model actually has get_input_embeddings()/generate() before trusting it)."
+        )
+        from transformers import AutoModel
+
+        llm = AutoModel.from_pretrained(model_cfg.llm.name, **load_kwargs)
+
     for p in llm.parameters():
         p.requires_grad = False
     return llm, tokenizer

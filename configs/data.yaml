@@ -11,6 +11,15 @@ sources:
     hf_path: gapatron/legacy_survey_south_images_captions
     revision: null   # not a `datasets.load_dataset`-shaped repo — see data/image_dataset.py.
                       # No `split` here: it's loaded as raw file pairs, not a HF Dataset split.
+  spectra_captions:
+    # Teammate-produced, spectrum-grounded LLM captions (Gemini) — the spectra-tier equivalent
+    # of gapatron's caption_blind for images. Covers a subset of objects (1,223 as of this
+    # filename); spectra-tier captions are restricted to just this set for now (see
+    # scripts/01_generate_captions.py) rather than falling back to mention_summary decomposition
+    # for the rest — a deliberate scope choice, not a limitation of the loader.
+    hf_path: ibrahimhabibeg/spectra_captions_dataset
+    filename: captions_combined_v1_gemini-3_7-flash_20260820_073856_filtered.jsonl
+    revision: null
 
 join:
   key: _healpix_29

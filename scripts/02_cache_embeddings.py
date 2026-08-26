@@ -27,13 +27,17 @@ logger = get_logger(__name__)
 def _spectra_batch_loader(raw_by_id: dict):
     """AstroBridge-Data's `spectrum` field (confirmed via the HF datasets-server schema for
     UniverseTBD/AstroBridge-Data) is a nested struct of five float32/bool lists:
-    `flux`, `ivar`, `lsf_sigma`, `lambda` (wavelength, in angstroms), `mask`. AION's DESISpectrum
-    codec wants `flux`/`ivar`/`mask`/`wavelength`; `lambda` is the wavelength grid — `lsf_sigma`
-    is unused here (not part of DESISpectrum's constructor).
+    `flux`, `ivar`, `lsf_sigma`, `lambda` (wavelength, in angstroms), `mask`. AION's
+    DESISpectrum/SDSSSpectrum codecs want `flux`/`ivar`/`mask`/`wavelength`; `lambda` is the
+    wavelength grid — `lsf_sigma` is unused (not part of either modality class's constructor).
+    `survey` (attached by data/spectra_dataset.py's `_attach_survey_column`) routes each object
+    to the matching modality class in aion_spectrum.py — see that file's docstring for why the
+    distinction between DESI-origin and SDSS-origin spectra is a real, non-optional requirement.
     """
 
     def _load(object_ids: list[str]) -> dict[str, torch.Tensor]:
-        spectra = [raw_by_id[oid]["spectrum"] for oid in object_ids]
+        rows = [raw_by_id[oid] for oid in object_ids]
+        spectra = [r["spectrum"] for r in rows]
         fluxes = [np.asarray(s["flux"], dtype=np.float32) for s in spectra]
         max_len = max(len(f) for f in fluxes)
 
@@ -49,7 +53,15 @@ def _spectra_batch_loader(raw_by_id: dict):
             ivar_tensor[i, :n] = torch.from_numpy(np.asarray(s["ivar"], dtype=np.float32))
             mask_tensor[i, :n] = torch.from_numpy(np.asarray(s["mask"], dtype=bool))
 
-        return {"flux": flux_tensor, "wavelength": wave_tensor, "ivar": ivar_tensor, "mask": mask_tensor}
+        survey = [r["survey"] for r in rows]
+
+        return {
+            "flux": flux_tensor,
+            "wavelength": wave_tensor,
+            "ivar": ivar_tensor,
+            "mask": mask_tensor,
+            "survey": survey,
+        }
 
     return _load
 

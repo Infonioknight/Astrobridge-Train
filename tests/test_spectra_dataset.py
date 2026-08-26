@@ -25,15 +25,15 @@ def test_concatenates_files_with_different_columns(tmp_path):
 
     df2 = pd.DataFrame({
         "object_id": ["c", "d"], "mention_summary": ["z", "w"], "Z": [0.3, 0.4],
-        "survey": ["SDSS", "SDSS"],  # extra column absent from df1 — this is what breaks `datasets`
+        "survey_metadata_extra": ["stuff", "stuff"],  # extra column absent from df1 — this is what breaks `datasets`
     })
-    df2.to_parquet(tmp_path / "desi_sdss.parquet")
+    df2.to_parquet(tmp_path / "sdss_only.parquet")
 
     with patch(
         "huggingface_hub.list_repo_files",
         return_value=[
             "observations/spectra/desi_only.parquet",
-            "observations/spectra/desi_sdss.parquet",
+            "observations/spectra/sdss_only.parquet",
             "README.md",
         ],
     ), patch(
@@ -45,17 +45,20 @@ def test_concatenates_files_with_different_columns(tmp_path):
     assert len(df) == 4
     assert set(df["object_id"]) == {"a", "b", "c", "d"}
     by_id = df.set_index("object_id")
-    assert pd.isna(by_id.loc["a", "survey"])
-    assert by_id.loc["c", "survey"] == "SDSS"
+    assert pd.isna(by_id.loc["a", "survey_metadata_extra"])
+    assert by_id.loc["c", "survey_metadata_extra"] == "stuff"
+    # Single-survey filenames determine every row's `survey` directly, no column needed.
+    assert by_id.loc["a", "survey"] == "desi"
+    assert by_id.loc["c", "survey"] == "sdss"
 
 
 def test_non_parquet_files_are_ignored(tmp_path):
     df1 = pd.DataFrame({"object_id": ["a"], "mention_summary": ["x"]})
-    df1.to_parquet(tmp_path / "only.parquet")
+    df1.to_parquet(tmp_path / "desi_only.parquet")
 
     with patch(
         "huggingface_hub.list_repo_files",
-        return_value=["observations/spectra/only.parquet", "observations/spectra/README.md", "LICENSE"],
+        return_value=["observations/spectra/desi_only.parquet", "observations/spectra/README.md", "LICENSE"],
     ), patch(
         "huggingface_hub.hf_hub_download",
         side_effect=lambda repo_id, filename, **k: str(tmp_path / Path(filename).name),
@@ -63,6 +66,42 @@ def test_non_parquet_files_are_ignored(tmp_path):
         df = load_spectra_table("UniverseTBD/AstroBridge-Data")
 
     assert len(df) == 1
+
+
+def test_mixed_survey_filename_requires_survey_column(tmp_path):
+    df1 = pd.DataFrame({"object_id": ["a"], "mention_summary": ["x"]})  # no survey column
+    df1.to_parquet(tmp_path / "desi_sdss_crossmatch.parquet")
+
+    with patch(
+        "huggingface_hub.list_repo_files",
+        return_value=["observations/spectra/desi_sdss_crossmatch.parquet"],
+    ), patch(
+        "huggingface_hub.hf_hub_download",
+        side_effect=lambda repo_id, filename, **k: str(tmp_path / Path(filename).name),
+    ):
+        try:
+            load_spectra_table("UniverseTBD/AstroBridge-Data")
+            assert False, "expected ValueError"
+        except ValueError as e:
+            assert "survey" in str(e)
+
+
+def test_mixed_survey_filename_uses_own_survey_column(tmp_path):
+    df1 = pd.DataFrame({"object_id": ["a", "b"], "mention_summary": ["x", "y"], "survey": ["DESI", "SDSS"]})
+    df1.to_parquet(tmp_path / "desi_sdss_crossmatch.parquet")
+
+    with patch(
+        "huggingface_hub.list_repo_files",
+        return_value=["observations/spectra/desi_sdss_crossmatch.parquet"],
+    ), patch(
+        "huggingface_hub.hf_hub_download",
+        side_effect=lambda repo_id, filename, **k: str(tmp_path / Path(filename).name),
+    ):
+        df = load_spectra_table("UniverseTBD/AstroBridge-Data")
+
+    by_id = df.set_index("object_id")
+    assert by_id.loc["a", "survey"] == "desi"  # lowercased
+    assert by_id.loc["b", "survey"] == "sdss"
 
 
 def test_deduplicate_prefers_smallest_dist_arcsec():
@@ -98,12 +137,12 @@ def test_load_spectra_table_result_is_never_duplicated(tmp_path):
     df1 = pd.DataFrame({"object_id": ["x", "a"], "mention_summary": ["desi text", "text a"], "_dist_arcsec": [0.5, 0.1]})
     df1.to_parquet(tmp_path / "desi_only.parquet")
 
-    df2 = pd.DataFrame({"object_id": ["x", "b"], "mention_summary": ["desi+sdss text", "text b"], "_dist_arcsec": [0.05, 0.2]})
-    df2.to_parquet(tmp_path / "desi_sdss.parquet")
+    df2 = pd.DataFrame({"object_id": ["x", "b"], "mention_summary": ["sdss text", "text b"], "_dist_arcsec": [0.05, 0.2]})
+    df2.to_parquet(tmp_path / "sdss_only.parquet")
 
     with patch(
         "huggingface_hub.list_repo_files",
-        return_value=["observations/spectra/desi_only.parquet", "observations/spectra/desi_sdss.parquet"],
+        return_value=["observations/spectra/desi_only.parquet", "observations/spectra/sdss_only.parquet"],
     ), patch(
         "huggingface_hub.hf_hub_download",
         side_effect=lambda repo_id, filename, **k: str(tmp_path / Path(filename).name),

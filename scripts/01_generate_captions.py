@@ -3,15 +3,25 @@
 CI gate (§4, §9 step 3). Gate: zero leakage violations, plus claim-survival rate reported, plus
 a sample written out for the required manual read of 50 captions spanning both tiers.
 
-Two caption sources, kept deliberately separate:
-  - spectra (+ relational/joint claims): decomposed from AstroBridge-Data's `mention_summary`,
-    same as always.
-  - image: gapatron's own `caption_blind` field (data/image_dataset.py) — generated without
-    literature context, i.e. grounded only in the image, with the dataset's own leak-detection
-    already checking for stage contamination. Used directly rather than re-derived via keyword
-    tagging, and this is also what makes image-only objects (no AstroBridge row at all) get a
-    caption now — they used to be silently dropped here, since the old version of this script
-    only ever looked at AstroBridge-Data's table.
+Three caption sources, kept deliberately separate:
+  - spectra: a teammate-produced, spectrum-grounded LLM caption set (Gemini —
+    ibrahimhabibeg/spectra_captions_dataset, see data/spectra_dataset.py:
+    load_gemini_spectra_captions). Covers a subset of objects (1,223 as of the configured
+    filename). Deliberate scope choice: spectra-tier captions are restricted to ONLY this set
+    for now — objects with spectra but no Gemini caption get no spectra-tier caption at all,
+    same asymmetry the image side already has (not every has_image object has a caption_blind
+    match either). No fallback to mention_summary decomposition for the rest.
+  - image: gapatron's own `caption_blind` field (data/image_dataset.py) — same reasoning as
+    spectra above: pre-vetted, modality-restricted, preferred over decomposing text ourselves.
+  - relational/joint claims (dormant — milestone 1 doesn't train on the joint tier, see
+    configs/modalities.yaml's dropout weights): still decomposed from AstroBridge-Data's
+    `mention_summary` via decompose_object, since Gemini's spectra captions and gapatron's image
+    captions are both single-modality-only and can't produce a claim that needs both together.
+    Pure single-modality claims from this decomposition are always dropped in favor of the two
+    pre-vetted sources above — decompose_object's only live output now is relational claims, so
+    `claim_survival_rate` in the report below is really measuring "how much of mention_summary
+    produces joint claims," not overall claim survival — a low number here is expected, not a
+    sign of something broken.
 """
 from __future__ import annotations
 
@@ -31,6 +41,7 @@ from captioner.data.captions import (
     _split_sentences,
 )
 from captioner.data.image_dataset import load_image_captions_table
+from captioner.data.spectra_dataset import load_gemini_spectra_captions, load_spectra_table
 from captioner.eval.claims import claim_kind_histogram, validate_all
 from captioner.utils.config import load_config
 from captioner.utils.logging import get_logger
@@ -43,12 +54,27 @@ def main() -> None:
     manifest = pd.read_parquet(cfg.manifest.parquet)
 
     # AstroBridge-Data carries the literature-derived fields directly.
-    from captioner.data.spectra_dataset import load_spectra_table
-
     spectra_ds = load_spectra_table(cfg.sources.spectra.hf_path, revision=cfg.sources.spectra.get("revision"))
     text_by_object = spectra_ds.set_index("object_id")[
         ["mention_summary", "evidence_quotes", "arxiv_id"]
     ].to_dict(orient="index")
+
+    # Gemini spectra captions are keyed by wiki_entity_id, not our canonical object_id — build
+    # the mapping from the same spectra_ds row (both columns confirmed present on AstroBridge-Data).
+    wiki_to_object_id = spectra_ds.dropna(subset=["wiki_entity_id"]).set_index("wiki_entity_id")["object_id"].to_dict()
+    gemini_captions_df = load_gemini_spectra_captions(
+        cfg.sources.spectra_captions.hf_path,
+        cfg.sources.spectra_captions.filename,
+        revision=cfg.sources.spectra_captions.get("revision"),
+    )
+    n_gemini_unmatched_wiki_id = 0
+    spectra_gemini_caption_by_object: dict[str, str] = {}
+    for _, grow in gemini_captions_df.iterrows():
+        oid = wiki_to_object_id.get(grow["wiki_entity_id"])
+        if oid is None:
+            n_gemini_unmatched_wiki_id += 1
+            continue
+        spectra_gemini_caption_by_object[oid] = grow["caption"]
 
     image_captions_df = load_image_captions_table(
         cfg.sources.image.hf_path, revision=cfg.sources.image.get("revision")
@@ -60,6 +86,8 @@ def main() -> None:
     n_surviving = 0
     n_image_from_gapatron = 0
     n_image_available = 0
+    n_spectra_from_gemini = 0
+    n_spectra_available = 0
     n_no_usable_text = 0
 
     for _, row in manifest.iterrows():
@@ -85,11 +113,10 @@ def main() -> None:
             n_source_sentences += len(_split_sentences(text_row.get("mention_summary") or ""))
             n_surviving += len(claims)
 
-            # Drop any mention_summary-derived pure-image claims — gapatron's caption_blind
-            # (below) is the preferred, pre-vetted source for the image tier, so prefer it and
-            # avoid tagging the same content twice from two different heuristics. Spectra and
-            # relational/joint claims from decomposition are kept as-is.
-            claims = [c for c in claims if c.supporting != frozenset({"image"})]
+            # Pure single-modality claims are always dropped in favor of the pre-vetted sources
+            # below (Gemini for spectra, caption_blind for image) — only relational/joint claims
+            # from this decomposition are ever used. See module docstring.
+            claims = [c for c in claims if len(c.supporting) > 1]
 
         if "image" in available:
             # manifest's canonical object_id is AstroBridge-Data's id (from
@@ -108,6 +135,20 @@ def main() -> None:
                     )
                 )
                 n_image_from_gapatron += 1
+
+        if "spectra" in available:
+            n_spectra_available += 1
+            gemini_caption = spectra_gemini_caption_by_object.get(object_id)
+            if gemini_caption:
+                claims.append(
+                    Claim(
+                        text=gemini_caption,
+                        supporting=frozenset({"spectra"}),
+                        kind="observation",
+                        provenance=f"gemini:{object_id}",
+                    )
+                )
+                n_spectra_from_gemini += 1
 
         if not claims:
             n_no_usable_text += 1
@@ -131,6 +172,16 @@ def main() -> None:
             "*_captions.json filenames before trusting image-tier caption coverage."
         )
 
+    spectra_caption_match_rate = n_spectra_from_gemini / n_spectra_available if n_spectra_available else None
+    if n_gemini_unmatched_wiki_id > 0:
+        logger.warning(
+            f"{n_gemini_unmatched_wiki_id}/{len(gemini_captions_df)} Gemini captions' "
+            "wiki_entity_id had no match in AstroBridge-Data's wiki_entity_id column — those "
+            "captions were dropped rather than silently misattributed. If this is a large "
+            "fraction, the id namespace assumption may not hold as cleanly as the spot-check "
+            "suggested; worth a closer look."
+        )
+
     report = {
         "n_objects_processed": len({c.object_id for c in all_captions}),
         "n_captions": len(all_captions),
@@ -140,6 +191,11 @@ def main() -> None:
         "n_image_captions_from_gapatron_blind": n_image_from_gapatron,
         "n_image_available": n_image_available,
         "image_caption_match_rate": image_caption_match_rate,
+        "n_spectra_captions_from_gemini": n_spectra_from_gemini,
+        "n_spectra_available": n_spectra_available,
+        "spectra_caption_match_rate": spectra_caption_match_rate,
+        "n_gemini_captions_total": len(gemini_captions_df),
+        "n_gemini_unmatched_wiki_id": n_gemini_unmatched_wiki_id,
         "n_objects_with_no_usable_text": n_no_usable_text,
         "generator": cfg.captions.generator,
     }
