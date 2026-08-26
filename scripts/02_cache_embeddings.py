@@ -197,6 +197,7 @@ def main() -> None:
     out_dir = Path(cfg.get("cache", {}).get("out_dir", "outputs/cache"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    manifest_dirty = False
     for name in modality_names:
         modality_cfg = cfg.modalities[name]
         encoder = build_encoder(name, modality_cfg, device=args.device)
@@ -217,7 +218,31 @@ def main() -> None:
             max_err = verify_fp16_roundtrip(encoder, sample_batch, n=len(sample_ids))
             logger.info(f"[{name}] float16 round-trip max abs error over {len(sample_ids)} objects: {max_err:.6f}")
 
-        cache_modality(name, encoder, modality_cfg, manifest, loader, out_dir, shard=args.shard_size)
+        _, excluded_ids = cache_modality(name, encoder, modality_cfg, manifest, loader, out_dir, shard=args.shard_size)
+        if excluded_ids:
+            # Correct the manifest in place: has_<name>=False for objects whose embedding came
+            # back non-finite, and re-derive `tier` for them (mirrors data/manifest.py's own
+            # `joint` iff has_spectra and has_image rule) so they're never sampled for this
+            # modality again — see cache_modality's docstring for why this must happen, not just
+            # be logged.
+            flag_col = f"has_{name}"
+            excluded_mask = manifest["object_id"].isin(excluded_ids)
+            manifest.loc[excluded_mask, flag_col] = False
+            if "tier" in manifest.columns:
+                manifest.loc[excluded_mask, "tier"] = np.where(
+                    manifest.loc[excluded_mask, "has_spectra"] & manifest.loc[excluded_mask, "has_image"],
+                    "joint", "single",
+                )
+            manifest_dirty = True
+
+    if manifest_dirty:
+        manifest_path = Path(cfg.manifest.parquet)
+        manifest.to_parquet(manifest_path, index=False)
+        logger.warning(
+            f"Rewrote {manifest_path} to reflect objects excluded above — re-run `make cache` "
+            "for any modality processed before this correction, or just be aware the manifest "
+            "changed underneath a run already in progress."
+        )
 
 
 if __name__ == "__main__":
