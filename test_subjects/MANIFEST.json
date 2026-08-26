@@ -1,0 +1,92 @@
+[
+  {
+    "file": "spectrum_01.npz",
+    "kind": "spectrum",
+    "survey": "desi",
+    "object_id": "39627939041510701",
+    "ra": 209.9834584352122,
+    "dec": 6.241737261955244,
+    "name": "DESI 39627939041510701"
+  },
+  {
+    "file": "spectrum_02.npz",
+    "kind": "spectrum",
+    "survey": "desi",
+    "object_id": "39633282643528688",
+    "ra": 212.83536627076774,
+    "dec": 52.20275963970047,
+    "name": "3C295"
+  },
+  {
+    "file": "spectrum_03.npz",
+    "kind": "spectrum",
+    "survey": "desi",
+    "object_id": "39633286363874179",
+    "ra": 214.46306937450925,
+    "dec": 52.386402297461494,
+    "name": "SDSS J141751.13+522311.0"
+  },
+  {
+    "file": "spectrum_04.npz",
+    "kind": "spectrum",
+    "survey": "desi",
+    "object_id": "39633290046473580",
+    "ra": 214.68512639179497,
+    "dec": 52.637201653586295,
+    "name": "12019899"
+  },
+  {
+    "file": "spectrum_05.npz",
+    "kind": "spectrum",
+    "survey": "desi",
+    "object_id": "39633286368069552",
+    "ra": 214.98031454620264,
+    "dec": 52.461429017598405,
+    "name": "SDSS J141955.26+522741.1"
+  },
+  {
+    "file": "image_01.npy",
+    "kind": "image",
+    "bands": "DES-G,DES-R,DES-Z",
+    "object_id": "39627939041510701",
+    "ra": 209.9834584352122,
+    "dec": 6.241737261955244,
+    "name": "DESI 39627939041510701"
+  },
+  {
+    "file": "image_02.npy",
+    "kind": "image",
+    "bands": "DES-G,DES-R,DES-Z",
+    "object_id": "39633282643528688",
+    "ra": 212.83536627076774,
+    "dec": 52.20275963970047,
+    "name": "3C295"
+  },
+  {
+    "file": "image_03.npy",
+    "kind": "image",
+    "bands": "DES-G,DES-R,DES-Z",
+    "object_id": "39633286363874179",
+    "ra": 214.46306937450925,
+    "dec": 52.386402297461494,
+    "name": "SDSS J141751.13+522311.0"
+  },
+  {
+    "file": "image_04.npy",
+    "kind": "image",
+    "bands": "DES-G,DES-R,DES-Z",
+    "object_id": "39633290046473580",
+    "ra": 214.68512639179497,
+    "dec": 52.637201653586295,
+    "name": "12019899"
+  },
+  {
+    "file": "image_05.npy",
+    "kind": "image",
+    "bands": "DES-G,DES-R,DES-Z",
+    "object_id": "39633286368069552",
+    "ra": 214.98031454620264,
+    "dec": 52.461429017598405,
+    "name": "SDSS J141955.26+522741.1"
+  }
+]
