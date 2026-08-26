@@ -16,6 +16,9 @@ from torch.utils.data import Dataset
 
 from captioner.data.cache import assert_cache_matches_config, cache_dir_for, load_cache_index
 from captioner.encoders.registry import encoder_hash, encoder_spec
+from captioner.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def _human_readable_subset(subset: frozenset[str]) -> str:
@@ -82,6 +85,38 @@ class CaptionerDataset(Dataset):
             (row["object_id"], frozenset(row["subset"])): row["text"]
             for _, row in captions.iterrows()
         }
+        # Per-object set of subsets that actually have a caption — NOT the same as "data is
+        # present for this subset". Confirmed real gap: spectra-tier captions are restricted to
+        # only the ~1,223 Gemini-covered objects (deliberate, no rule-based fallback — see
+        # 01_generate_captions.py), so most has_spectra=True objects have spectrum embeddings
+        # but no caption for subset={"spectra"}. Sampling `available` alone (has_<modality>
+        # flags) would pick that subset anyway, land on an empty caption_text, and produce a
+        # sample whose labels are entirely IGNORE_INDEX — a real, confirmed cause of NaN loss
+        # when enough such samples land in the same micro-batch (see train/loop.py's degenerate-
+        # batch guard for the other half of this fix).
+        self._caption_subsets_by_object: dict[str, set[frozenset]] = {}
+        for object_id, subset in self._captions_by_key:
+            self._caption_subsets_by_object.setdefault(object_id, set()).add(subset)
+
+        # Drop objects that can never produce a real training example: no subset of their
+        # available modalities has a caption at all, so `_sample_target_subset` would fall back
+        # to frozenset() (empty prompt, empty caption) on every single visit, every epoch —
+        # dead weight that only dilutes the loss. Object-level, not modality-specific, so this
+        # needs no change when a third modality is added.
+        def _has_any_usable_subset(row: pd.Series) -> bool:
+            available = self._availability(row)
+            captioned = self._caption_subsets_by_object.get(row["object_id"], set())
+            return any(s.issubset(available) and s in captioned for s, _ in self.subset_weights)
+
+        usable_mask = self.manifest.apply(_has_any_usable_subset, axis=1)
+        n_dropped = int((~usable_mask).sum())
+        if n_dropped:
+            logger.warning(
+                f"[{split}] Dropping {n_dropped}/{len(self.manifest)} objects with no captioned "
+                "subset at all (data present but no caption exists for any subset of it) — they "
+                "would only ever produce empty-caption training examples."
+            )
+        self.manifest = self.manifest[usable_mask].reset_index(drop=True)
 
     def __len__(self) -> int:
         return len(self.manifest)
@@ -94,11 +129,15 @@ class CaptionerDataset(Dataset):
                 present.add(name)
         return frozenset(present)
 
-    def _sample_target_subset(self, available: frozenset[str], rng: np.random.Generator) -> frozenset[str]:
+    def _sample_target_subset(
+        self, available: frozenset[str], rng: np.random.Generator, captioned: set[frozenset]
+    ) -> frozenset[str]:
         """Sample the target subset first from configured weights, restricted to subsets that
-        are actually available, then renormalize — never sample per-modality independently.
+        are both actually available AND actually have a caption for this object, then
+        renormalize — never sample per-modality independently, and never pick a subset with no
+        real caption to train against.
         """
-        candidates = [(s, w) for s, w in self.subset_weights if s.issubset(available)]
+        candidates = [(s, w) for s, w in self.subset_weights if s.issubset(available) and s in captioned]
         if not candidates:
             return frozenset()
         weights = np.array([w for _, w in candidates], dtype=np.float64)
@@ -112,7 +151,8 @@ class CaptionerDataset(Dataset):
         available = self._availability(row)
 
         rng = np.random.default_rng(hash((object_id, idx)) & 0xFFFFFFFF)
-        shown = self._sample_target_subset(available, rng)
+        captioned = self._caption_subsets_by_object.get(object_id, set())
+        shown = self._sample_target_subset(available, rng, captioned)
 
         modality_arrays: dict[str, np.ndarray | None] = {}
         for name in self.modality_names:

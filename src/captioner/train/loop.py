@@ -56,6 +56,21 @@ def _append_metric(run_dir: Path, record: dict) -> None:
         f.write(json.dumps(record) + "\n")
 
 
+def _is_degenerate_batch(batch: dict) -> bool:
+    """True iff every caption position in this micro-batch is padding — i.e. every sample's
+    labels are entirely IGNORE_INDEX (see model/captioner.py). HF's CrossEntropyLoss computes a
+    mean over all valid label positions in the batch; with zero valid positions that's 0/0 = NaN,
+    which then poisons this step's gradients/Adam state for every trainable parameter (they're
+    all shared across the batch). Confirmed real cause: `data/dataset.py`'s subset sampling used
+    to consider a subset "available" purely from has_<modality> manifest flags, without checking
+    whether a caption actually exists for that (object_id, subset) pair — e.g. spectra-tier
+    captions only cover ~1,223 of the has_spectra=True objects. That's fixed at the source now
+    (dataset.py only samples captioned subsets), but this is kept as a second line of defense —
+    skip and warn rather than silently train on/report a NaN.
+    """
+    return not bool(batch["caption_attn_mask"].any())
+
+
 def find_latest_checkpoint(run_dir: Path) -> Path | None:
     if not run_dir.exists():
         return None
@@ -135,6 +150,12 @@ def run_training(
         epoch_loss_sum = 0.0
         epoch_loss_count = 0
         for batch in pbar:
+            if _is_degenerate_batch(batch):
+                accelerator.print(
+                    f"Skipping degenerate micro-batch (no valid caption tokens): "
+                    f"object_id={batch['object_id']} shown={batch['shown']}"
+                )
+                continue
             with accelerator.accumulate(model):
                 out = model(
                     batch["modality_batch"],
@@ -192,6 +213,12 @@ def evaluate_loss(accelerator: Accelerator, model: Captioner, loader: DataLoader
     total_loss = torch.zeros(1, device=accelerator.device)
     total_n = torch.zeros(1, device=accelerator.device)
     for batch in loader:
+        if _is_degenerate_batch(batch):
+            accelerator.print(
+                f"Skipping degenerate val micro-batch (no valid caption tokens): "
+                f"object_id={batch['object_id']} shown={batch['shown']}"
+            )
+            continue
         out = model(
             batch["modality_batch"],
             batch["prompt_ids"],
