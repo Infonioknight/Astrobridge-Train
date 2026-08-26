@@ -18,7 +18,7 @@ lora:
 
 batch_size: 32
 micro_batch_size: 4
-epochs: 4
+epochs: 15
 early_stop: {metric: val_loss, patience: 1}
 warmup_frac: 0.10
 weight_decay: 0.05
