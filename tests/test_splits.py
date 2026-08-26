@@ -40,3 +40,29 @@ def test_unpaired_objects_go_to_train_only():
     result = assign_splits(manifest, _cfg())
     single_rows = result[result["tier"] == "single"]
     assert (single_rows["split"] == "train").all()
+
+
+def test_falls_back_to_stratified_split_when_too_few_joint_objects():
+    """The real scenario hit in production: 0 joint objects (object_id/target_object_id_target
+    namespace mismatch between the image and spectra sources). Joint-only val/test would be
+    completely empty, which silently breaks early stopping (see assign_splits' docstring) — so
+    below min_joint_objects, val/test must be drawn from all tiers instead, not left empty.
+    """
+    manifest = _synthetic_manifest(n_joint=0, n_single=60)
+    cfg = OmegaConf.create({"splits": {"val": 0.1, "test": 0.1, "seed": 0}, "sanity": {"min_joint_objects": 500}})
+
+    result = assign_splits(manifest, cfg)
+
+    assert (result["split"] == "val").sum() > 0
+    assert (result["split"] == "test").sum() > 0
+    assert result.groupby("object_id")["split"].nunique().max() == 1
+
+
+def test_uses_joint_only_when_above_threshold():
+    manifest = _synthetic_manifest(n_joint=40, n_single=60)
+    cfg = OmegaConf.create({"splits": {"val": 0.1, "test": 0.1, "seed": 0}, "sanity": {"min_joint_objects": 10}})
+
+    result = assign_splits(manifest, cfg)
+
+    non_train = result[result["split"] != "train"]
+    assert (non_train["tier"] == "joint").all()

@@ -187,20 +187,49 @@ def _compute_stats(manifest: pd.DataFrame, join_method: str, cfg: DictConfig) ->
 
 
 def assign_splits(manifest: pd.DataFrame, cfg: DictConfig) -> pd.DataFrame:
-    """Object-level 80/10/10. Val/test drawn from joint objects only; unpaired objects go to
-    train only. Same object_id never appears in two splits.
+    """Object-level 80/10/10. Val/test are drawn from joint objects only *when there are enough
+    of them* (>= sanity.min_joint_objects) — that's the spec's original intent, so joint-tier
+    eval is honest once milestone 2 (joint training) is real. Below that threshold — including
+    the current 0-joint-object state, a real consequence of the object_id/target_object_id_target
+    namespace mismatch, not a milestone-1-scope non-issue — falling back to joint-only would
+    leave val/test completely empty. An empty val set doesn't just mean "no eval": evaluate_loss
+    returns a fake 0.0 every epoch, which early-stopping reads as "no improvement" from epoch 2
+    onward, silently truncating training after `patience` epochs regardless of real progress.
+    So below the threshold, val/test are drawn from ALL objects instead (stratified by tier so
+    single-image and single-spectra objects are both represented), with a loud warning — this
+    keeps milestone-1 single-modality training and eval meaningful without needing the joint
+    crossmatch fixed first.
     """
     rng = np.random.default_rng(int(cfg.splits.seed))
     manifest = manifest.copy()
     manifest["split"] = "train"
 
     joint_ids = manifest.loc[manifest["tier"] == "joint", "object_id"].to_numpy()
-    rng.shuffle(joint_ids)
+    min_joint = int(cfg.sanity.min_joint_objects) if "sanity" in cfg else 0
 
-    n_val = int(round(len(joint_ids) * cfg.splits.val))
-    n_test = int(round(len(joint_ids) * cfg.splits.test))
-    val_ids = set(joint_ids[:n_val])
-    test_ids = set(joint_ids[n_val : n_val + n_test])
+    if len(joint_ids) >= min_joint and len(joint_ids) > 0:
+        eligible_by_tier = {"joint": joint_ids}
+    else:
+        logger.warning(
+            f"Only {len(joint_ids)} joint objects (< min_joint_objects={min_joint}) — val/test "
+            "would be empty if drawn from joint-tier only, which silently breaks early stopping "
+            "(fake 0.0 val loss every epoch). Falling back to drawing val/test from ALL tiers, "
+            "stratified, until the joint crossmatch produces enough real joint objects."
+        )
+        eligible_by_tier = {
+            tier: manifest.loc[manifest["tier"] == tier, "object_id"].to_numpy()
+            for tier in manifest["tier"].unique()
+        }
+
+    val_ids: set = set()
+    test_ids: set = set()
+    for tier_ids in eligible_by_tier.values():
+        tier_ids = tier_ids.copy()
+        rng.shuffle(tier_ids)
+        n_val = int(round(len(tier_ids) * cfg.splits.val))
+        n_test = int(round(len(tier_ids) * cfg.splits.test))
+        val_ids.update(tier_ids[:n_val])
+        test_ids.update(tier_ids[n_val : n_val + n_test])
 
     manifest.loc[manifest["object_id"].isin(val_ids), "split"] = "val"
     manifest.loc[manifest["object_id"].isin(test_ids), "split"] = "test"
