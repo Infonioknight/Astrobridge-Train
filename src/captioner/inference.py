@@ -1,0 +1,121 @@
+"""Single-object, no-cache inference: raw image/spectrum arrays in, caption out — for a
+brand-new object that was never part of the manifest/embedding-cache pipeline. Distinct from
+data/dataset.py's CaptionerDataset, which only reads pre-cached embeddings keyed by object_id.
+
+Runs the same three stages training does (encoders -> FusionStack -> LLM), just live instead of
+cached, and with the same autocast(bf16) wrapping eval/groundedness.py needs to reconcile the
+fp32 FusionStack against the bf16 LLM (see that module's docstring for why that's required).
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import torch
+from omegaconf import DictConfig
+
+from captioner.encoders.registry import build_encoder
+from captioner.model.captioner import Captioner, FusionStack
+from captioner.train.stage1 import build_llm, get_llm_hidden_size
+from captioner.utils.prompt import human_readable_subset
+
+
+def load_inference_model(
+    cfg: DictConfig, checkpoint_dir: Path, lora_dir: Path | None, device: str = "cuda"
+) -> tuple[Captioner, Any, dict]:
+    """`checkpoint_dir` needs middle.pt (e.g. outputs/checkpoints/stage2/best, or stage1's).
+    `lora_dir` is the matching lora/ subfolder — pass None for a stage-1-only checkpoint.
+    Only builds encoders for modalities actually requested at call time — see generate_caption.
+    """
+    llm, tokenizer = build_llm(cfg)
+    if lora_dir is not None:
+        from peft import PeftModel
+
+        llm = PeftModel.from_pretrained(llm, str(lora_dir))
+    d_llm = get_llm_hidden_size(llm)
+
+    out_dims = {n: int(c.out_dim) for n, c in cfg.modalities.items()}
+    fusion_stack = FusionStack(
+        modality_out_dims=out_dims,
+        d_shared=int(cfg.d_shared),
+        d_llm=d_llm,
+        qformer_cfg=dict(cfg.qformer),
+        projector_hidden_mult=int(cfg.projector.hidden_mult),
+        projector_dropout=float(cfg.projector.dropout),
+    )
+    fusion_stack.load_state_dict(
+        torch.load(Path(checkpoint_dir) / "middle.pt", map_location="cpu", weights_only=False)
+    )
+
+    model = Captioner(fusion_stack, llm, n_queries=int(cfg.qformer.n_queries))
+    model.to(device)
+    model.eval()
+
+    encoders = {name: build_encoder(name, cfg.modalities[name], device=device) for name in cfg.modalities}
+    return model, tokenizer, encoders
+
+
+@torch.no_grad()
+def generate_caption(
+    model: Captioner,
+    tokenizer,
+    encoders: dict,
+    modality_out_dims: dict[str, int],
+    modality_max_tokens: dict[str, int],
+    prompt_template: str,
+    device: str,
+    raw_inputs: dict[str, dict[str, Any]],
+    max_new_tokens: int = 128,
+    question: str | None = None,
+) -> str:
+    """`raw_inputs`: {modality_name: encoder-specific batch dict}, only for modalities actually
+    present — e.g. {"image": {"pixel_values": ...}} or
+    {"spectra": {"flux": ..., "ivar": ..., "mask": ..., "wavelength": ..., "survey": [...]}}.
+    See each encoder's `encode()` docstring (encoders/aion_image.py, aion_spectrum.py) for the
+    exact field contract. A modality absent from `raw_inputs` is treated as not shown at all —
+    true exclusion (all-True mask), never a zero-content placeholder (§6).
+
+    `question`: free-form text used verbatim as the prompt instead of `prompt_template`'s fixed
+    "Describe the object shown, using only {modalities}." — LoRA/the fusion stack were only ever
+    trained against that one fixed instruction, so this leans entirely on the frozen base LLM's
+    own general instruction-following ability generalizing to a different instruction while
+    still conditioning on the visual/spectral prefix. Untested territory, not a guarantee —
+    that's the actual point of exposing it (see scripts/07_infer.py's --question flag).
+    """
+    if not raw_inputs:
+        raise ValueError("raw_inputs is empty — at least one modality must be provided.")
+
+    shown = frozenset(raw_inputs.keys())
+    modality_batch: dict[str, dict[str, torch.Tensor]] = {}
+    for name, out_dim in modality_out_dims.items():
+        T_m = modality_max_tokens[name]
+        if name in raw_inputs:
+            tokens = encoders[name].encode(raw_inputs[name]).to(torch.float32)  # (1, T_m, out_dim)
+            if tokens.shape[1] != T_m:
+                raise ValueError(
+                    f"{name} encoder returned {tokens.shape[1]} tokens, expected {T_m} "
+                    "(modalities.yaml's max_tokens should equal num_encoder_tokens the encoder "
+                    "was built with — see encoders/registry.py's build_encoder)."
+                )
+            mask = torch.zeros((1, T_m), dtype=torch.bool, device=device)
+        else:
+            tokens = torch.zeros((1, T_m, out_dim), dtype=torch.float32, device=device)
+            mask = torch.ones((1, T_m), dtype=torch.bool, device=device)
+        modality_batch[name] = {"tokens": tokens.to(device), "mask": mask}
+
+    prompt_text = question if question is not None else prompt_template.format(modalities=human_readable_subset(shown))
+    prompt_ids = tokenizer(prompt_text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(device)
+
+    device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        prefix = model.fusion_stack(modality_batch)
+        prompt_embeds = model.llm.get_input_embeddings()(prompt_ids)
+        inputs_embeds = torch.cat([prefix, prompt_embeds], dim=1)
+        attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=device)
+        gen = model.llm.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+        )
+    return tokenizer.batch_decode(gen, skip_special_tokens=True)[0]

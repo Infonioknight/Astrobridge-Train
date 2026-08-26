@@ -17,15 +17,9 @@ from torch.utils.data import Dataset
 from captioner.data.cache import assert_cache_matches_config, cache_dir_for, load_cache_index
 from captioner.encoders.registry import encoder_hash, encoder_spec
 from captioner.utils.logging import get_logger
+from captioner.utils.prompt import human_readable_subset
 
 logger = get_logger(__name__)
-
-
-def _human_readable_subset(subset: frozenset[str]) -> str:
-    names = sorted(subset)
-    if len(names) == 1:
-        return f"a {names[0]}" if names[0] != "image" else "an image"
-    return " and ".join(names)
 
 
 class ModalityCacheReader:
@@ -162,7 +156,7 @@ class CaptionerDataset(Dataset):
                 modality_arrays[name] = None
 
         caption_text = self._captions_by_key.get((object_id, shown), "")
-        prompt_text = self.prompt_template.format(modalities=_human_readable_subset(shown))
+        prompt_text = self.prompt_template.format(modalities=human_readable_subset(shown))
 
         prompt_ids = self.tokenizer(prompt_text, add_special_tokens=False, return_tensors="pt")["input_ids"][0]
         caption_ids = self.tokenizer(

@@ -3,7 +3,7 @@
 # Override on the command line, e.g.: make stage1 ACCELERATE_CONFIG=configs/my_cluster.yaml
 ACCELERATE_CONFIG ?= configs/accelerate_ddp.yaml
 
-.PHONY: test manifest captions cache stage1 eval stage2 install check-access publish
+.PHONY: test manifest captions cache stage1 eval stage2 install check-access publish infer
 
 install:
 	pip install -e ".[dev]"
@@ -37,3 +37,12 @@ publish:
 	@test -n "$(CKPT)" || (echo "Usage: make publish CKPT=outputs/checkpoints/stage2/best REPO=your-org/astrobridge-captioner-v1" && exit 1)
 	@test -n "$(REPO)" || (echo "Usage: make publish CKPT=outputs/checkpoints/stage2/best REPO=your-org/astrobridge-captioner-v1" && exit 1)
 	python scripts/06_publish_model.py --checkpoint-dir $(CKPT) --repo-id $(REPO)
+
+infer:
+	@test -n "$(CKPT)" || (echo "Usage: make infer CKPT=outputs/checkpoints/stage2/best QUESTION='What kind of object is this?' [LORA=...] [IMAGE=cutout.npy] [SPECTRUM=spectrum.npz] [SURVEY=desi]" && exit 1)
+	@test -n "$(QUESTION)" || (echo "Usage: make infer CKPT=outputs/checkpoints/stage2/best QUESTION='What kind of object is this?' [LORA=...] [IMAGE=cutout.npy] [SPECTRUM=spectrum.npz] [SURVEY=desi]" && exit 1)
+	python scripts/07_infer.py --checkpoint-dir $(CKPT) --question "$(QUESTION)" \
+		$(if $(LORA),--lora-dir $(LORA)) \
+		$(if $(IMAGE),--image-npy $(IMAGE)) \
+		$(if $(SPECTRUM),--spectrum-npz $(SPECTRUM)) \
+		$(if $(SURVEY),--spectrum-survey $(SURVEY))
