@@ -21,6 +21,9 @@ dependencies = [
     "omegaconf>=2.3",
     "astropy>=6.0",
     "tqdm>=4.66",
+    "onnxruntime>=1.17",   # runs the frozen ATCAT light-curve encoder (light-curve/atcat) during
+                           # offline embedding caching only — training never imports it. CPU build
+                           # is sufficient: the model is ~12MB and runs once over the dataset.
     "polymathic-aion",   # provides the `aion` import (AION, CodecManager, aion.modalities.*)
                           # — see src/captioner/encoders/aion_common.py. No version pinned here;
                           # confirm against https://huggingface.co/polymathic-ai/aion-base's

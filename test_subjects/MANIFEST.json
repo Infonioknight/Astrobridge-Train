@@ -88,5 +88,55 @@
     "ra": 214.98031454620264,
     "dec": 52.461429017598405,
     "name": "SDSS J141955.26+522741.1"
+  },
+  {
+    "file": "lightcurve_01.npz",
+    "kind": "lightcurve",
+    "flux_units": "SNANA FLUXCAL, zeropoint 27.5",
+    "bands": "g=1,r=2 (0 = excluded, masked out by `use`)",
+    "object_id": "ZTF18AAHVNDQ",
+    "class_label": "SN Ia",
+    "n_accepted_points": 33,
+    "name": "ZTF18AAHVNDQ"
+  },
+  {
+    "file": "lightcurve_02.npz",
+    "kind": "lightcurve",
+    "flux_units": "SNANA FLUXCAL, zeropoint 27.5",
+    "bands": "g=1,r=2 (0 = excluded, masked out by `use`)",
+    "object_id": "ZTF18AAILMNV",
+    "class_label": "SN Ia",
+    "n_accepted_points": 33,
+    "name": "ZTF18AAILMNV"
+  },
+  {
+    "file": "lightcurve_03.npz",
+    "kind": "lightcurve",
+    "flux_units": "SNANA FLUXCAL, zeropoint 27.5",
+    "bands": "g=1,r=2 (0 = excluded, masked out by `use`)",
+    "object_id": "ZTF18AAIWZIE",
+    "class_label": "SN Ia",
+    "n_accepted_points": 25,
+    "name": "ZTF18AAIWZIE"
+  },
+  {
+    "file": "lightcurve_04.npz",
+    "kind": "lightcurve",
+    "flux_units": "SNANA FLUXCAL, zeropoint 27.5",
+    "bands": "g=1,r=2 (0 = excluded, masked out by `use`)",
+    "object_id": "ZTF18AASPRUI",
+    "class_label": "SN Ia",
+    "n_accepted_points": 26,
+    "name": "ZTF18AASPRUI"
+  },
+  {
+    "file": "lightcurve_05.npz",
+    "kind": "lightcurve",
+    "flux_units": "SNANA FLUXCAL, zeropoint 27.5",
+    "bands": "g=1,r=2 (0 = excluded, masked out by `use`)",
+    "object_id": "ZTF18AATLFUS",
+    "class_label": "SN II",
+    "n_accepted_points": 27,
+    "name": "ZTF18AATLFUS"
   }
 ]

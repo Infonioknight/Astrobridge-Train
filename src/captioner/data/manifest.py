@@ -45,6 +45,30 @@ def _load_image_table(cfg: DictConfig) -> pd.DataFrame:
     )
 
 
+def _load_transients_table(cfg: DictConfig) -> pd.DataFrame | None:
+    """`BuildNg/astrobridge-transients-dataset` — ZTF light curves, appended not joined.
+
+    Returns None when the source is not configured, so a config predating this modality still
+    builds a manifest unchanged.
+    """
+    if "transients" not in cfg.sources:
+        return None
+    from captioner.data.transients_dataset import load_transients_table
+
+    return load_transients_table(
+        cfg.sources.transients.hf_path,
+        revision=cfg.sources.transients.get("revision"),
+    )
+
+
+def _modality_names_from_flags(df: pd.DataFrame) -> list[str]:
+    """Modality names derived from the frame's own `has_<name>` columns rather than from
+    configs/modalities.yaml, because scripts/00_build_manifest.py loads only base+data — the
+    registry is not in scope here. Adding a modality therefore needs no change in this module.
+    """
+    return sorted(c[len("has_") :] for c in df.columns if c.startswith("has_"))
+
+
 def _crossmatch_coords(left: pd.DataFrame, right: pd.DataFrame, radius_arcsec: float) -> pd.DataFrame:
     from astropy.coordinates import SkyCoord
     import astropy.units as u
@@ -131,18 +155,42 @@ def build_manifest(cfg: DictConfig) -> tuple[pd.DataFrame, dict]:
         merged_key = pd.concat([joint, spec_only, image_only], ignore_index=True, sort=False)
         join_method = f"coord@{cfg.join.fallback_radius_arcsec}arcsec"
 
-    merged_key["has_spectra"] = merged_key.get("has_spectra", False).fillna(False).infer_objects(copy=False).astype(bool)
-    merged_key["has_image"] = merged_key.get("has_image", False).fillna(False).infer_objects(copy=False).astype(bool)
-
-    def tier(row) -> str:
-        if row["has_spectra"] and row["has_image"]:
-            return "joint"
-        return "single"
-
-    merged_key["tier"] = merged_key.apply(tier, axis=1)
-
     if "object_id" not in merged_key.columns:
         merged_key["object_id"] = merged_key.index.astype(str)
+
+    # Transients are APPENDED, never merged: a ZTF designation shares no namespace with
+    # AstroBridge-Data's object_id, the Legacy Survey's object_id_legacy, or the Gemini captions'
+    # wiki_entity_id, so there is nothing to join on. They arrive with has_lightcurve=True and pick
+    # up has_image/has_spectra=False from the fill below.
+    transients_df = _load_transients_table(cfg)
+    if transients_df is not None:
+        _assert_unique_object_id(transients_df, "transients table")
+        collisions = set(transients_df["object_id"]) & set(merged_key["object_id"])
+        if collisions:
+            raise ValueError(
+                f"{len(collisions)} transient object_id(s) collide with the image/spectra manifest "
+                f"(e.g. {sorted(collisions)[:3]}). ZTF designations are meant to be a disjoint "
+                "namespace; appending them would silently create duplicate manifest rows."
+            )
+        merged_key = pd.concat([merged_key, transients_df], ignore_index=True, sort=False)
+        logger.info(f"Appended {len(transients_df)} transient objects (lightcurve-only)")
+
+    # Force the two original flags into existence so a source producing no rows still yields a
+    # well-formed manifest — what the previous `.get(..., False)` calls provided.
+    for name in ("spectra", "image"):
+        if f"has_{name}" not in merged_key.columns:
+            merged_key[f"has_{name}"] = False
+
+    modality_names = _modality_names_from_flags(merged_key)
+    for name in modality_names:
+        col = f"has_{name}"
+        merged_key[col] = merged_key[col].fillna(False).infer_objects(copy=False).astype(bool)
+
+    # `joint` = more than one modality present, derived from the flag columns rather than a
+    # hardcoded has_spectra-and-has_image pair, so adding a modality needs no change here. The two
+    # labels are deliberately unchanged, so tier_histogram consumers and existing tests keep working.
+    flag_cols = [f"has_{n}" for n in modality_names]
+    merged_key["tier"] = np.where(merged_key[flag_cols].sum(axis=1) >= 2, "joint", "single")
 
     # Drop heavy nested/array columns before writing — the raw `spectrum` struct (flux/ivar/
     # mask/lambda, thousands of floats per object) and whatever the image dataset's pixel-cutout
@@ -150,14 +198,29 @@ def build_manifest(cfg: DictConfig) -> tuple[pd.DataFrame, dict]:
     # 02_cache_embeddings.py reloads the raw HF datasets itself for encoding, and everything else
     # only needs scalars/metadata. Keeping them here would silently duplicate the full raw
     # dataset size into a second on-disk copy for no reason.
-    heavy_columns = [c for c in ("spectrum", "image") if c in merged_key.columns]
+    heavy_columns = [
+        c
+        for c in (
+            "spectrum",
+            "image",
+            # The transients' light-curve arrays: 02_cache_embeddings.py reloads them from the
+            # source, so duplicating them into manifest.parquet buys nothing. `atcat_length` and
+            # `class_label` are scalars and are kept for diagnostics / eval slicing.
+            "lc_mjd",
+            "atcat_flux",
+            "atcat_flux_error",
+            "atcat_band_id",
+            "atcat_use",
+        )
+        if c in merged_key.columns
+    ]
     if heavy_columns:
         logger.info(f"Dropping heavy array columns from manifest.parquet: {heavy_columns}")
 
-    manifest = merged_key[["object_id", "has_spectra", "has_image", "tier"] + [
-        c for c in merged_key.columns
-        if c not in ("object_id", "has_spectra", "has_image", "tier") and c not in heavy_columns
-    ]].copy()
+    leading = ["object_id"] + flag_cols + ["tier"]
+    manifest = merged_key[
+        leading + [c for c in merged_key.columns if c not in leading and c not in heavy_columns]
+    ].copy()
 
     stats = _compute_stats(manifest, join_method, cfg)
     return manifest, stats
@@ -168,13 +231,33 @@ def _compute_stats(manifest: pd.DataFrame, join_method: str, cfg: DictConfig) ->
     n_joint = int(tier_hist.get("joint", 0))
     n_total = len(manifest)
 
+    modality_names = _modality_names_from_flags(manifest)
+
+    def _only(name: str) -> int:
+        mask = manifest[f"has_{name}"].copy()
+        for other in modality_names:
+            if other != name:
+                mask &= ~manifest[f"has_{other}"]
+        return int(mask.sum())
+
+    # Generic per-combination counts, so a lightcurve-only object is not silently invisible the way
+    # it would be to the two hardcoded `n_*_only` keys below (which are kept for compatibility).
+    availability_histogram: dict[str, int] = {}
+    for present in (
+        tuple(m for m in modality_names if bool(row[f"has_{m}"])) for _, row in manifest.iterrows()
+    ):
+        key = "+".join(present) if present else "none"
+        availability_histogram[key] = availability_histogram.get(key, 0) + 1
+
     stats = {
         "join_method": join_method,
         "n_total_objects": n_total,
-        "n_spectra_only": int(((manifest["has_spectra"]) & (~manifest["has_image"])).sum()),
-        "n_image_only": int(((manifest["has_image"]) & (~manifest["has_spectra"])).sum()),
+        "modalities": modality_names,
+        "n_spectra_only": _only("spectra") if "spectra" in modality_names else 0,
+        "n_image_only": _only("image") if "image" in modality_names else 0,
         "n_joint": n_joint,
         "tier_histogram": {k: int(v) for k, v in tier_hist.items()},
+        "availability_histogram": availability_histogram,
     }
 
     if n_joint < cfg.sanity.min_joint_objects:
@@ -199,6 +282,12 @@ def assign_splits(manifest: pd.DataFrame, cfg: DictConfig) -> pd.DataFrame:
     single-image and single-spectra objects are both represented), with a loud warning — this
     keeps milestone-1 single-modality training and eval meaningful without needing the joint
     crossmatch fixed first.
+
+    `cfg.splits.policy` makes that choice explicit rather than threshold-inferred: 'auto' (the
+    default, and the behaviour described above), 'stratified' (always all tiers) or 'joint_only'
+    (always joint). It is pinned to 'stratified' in configs/data.yaml so that adding a source which
+    happens to push the joint count past min_joint_objects cannot silently redefine what val/test
+    mean mid-project.
     """
     rng = np.random.default_rng(int(cfg.splits.seed))
     manifest = manifest.copy()
@@ -207,15 +296,42 @@ def assign_splits(manifest: pd.DataFrame, cfg: DictConfig) -> pd.DataFrame:
     joint_ids = manifest.loc[manifest["tier"] == "joint", "object_id"].to_numpy()
     min_joint = int(cfg.sanity.min_joint_objects) if "sanity" in cfg else 0
 
-    if len(joint_ids) >= min_joint and len(joint_ids) > 0:
+    policy = str(cfg.splits.get("policy", "auto")) if "splits" in cfg else "auto"
+    if policy not in ("auto", "stratified", "joint_only"):
+        raise ValueError(
+            f"splits.policy={policy!r} is not recognised; expected one of "
+            "'auto', 'stratified', 'joint_only'."
+        )
+
+    if policy == "joint_only":
+        use_joint_only = True
+    elif policy == "stratified":
+        use_joint_only = False
+    else:
+        use_joint_only = len(joint_ids) >= min_joint and len(joint_ids) > 0
+
+    if use_joint_only:
+        if len(joint_ids) == 0:
+            raise ValueError(
+                "splits.policy='joint_only' but the manifest has no joint-tier objects, so val and "
+                "test would be empty — which makes evaluate_loss return a fake 0.0 every epoch and "
+                "silently truncates training via early stopping. Use 'stratified' until the joint "
+                "crossmatch produces real joint objects."
+            )
         eligible_by_tier = {"joint": joint_ids}
     else:
-        logger.warning(
-            f"Only {len(joint_ids)} joint objects (< min_joint_objects={min_joint}) — val/test "
-            "would be empty if drawn from joint-tier only, which silently breaks early stopping "
-            "(fake 0.0 val loss every epoch). Falling back to drawing val/test from ALL tiers, "
-            "stratified, until the joint crossmatch produces enough real joint objects."
-        )
+        if policy == "auto":
+            logger.warning(
+                f"Only {len(joint_ids)} joint objects (< min_joint_objects={min_joint}) — val/test "
+                "would be empty if drawn from joint-tier only, which silently breaks early stopping "
+                "(fake 0.0 val loss every epoch). Falling back to drawing val/test from ALL tiers, "
+                "stratified, until the joint crossmatch produces enough real joint objects."
+            )
+        else:
+            logger.info(
+                f"splits.policy='stratified': drawing val/test from all tiers, stratified "
+                f"({len(joint_ids)} joint objects present; threshold not consulted)."
+            )
         eligible_by_tier = {
             tier: manifest.loc[manifest["tier"] == tier, "object_id"].to_numpy()
             for tier in manifest["tier"].unique()

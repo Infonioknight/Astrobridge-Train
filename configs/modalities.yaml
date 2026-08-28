@@ -22,6 +22,23 @@ modalities:
     out_dim: 768
     max_tokens: 512
 
+  lightcurve:
+    encoder:
+      impl: atcat_lightcurve                 # wrapper class in encoders/registry.py
+      hf_path: light-curve/atcat             # ATCAT (Tung 2025, arXiv:2511.00614), ONNX export
+      revision: null                         # pin a commit sha for reproducibility
+      kwargs:
+        onnx_file: atcat_f32.onnx
+        output: sequence                     # per-timestep features; `last`/`mean` are POOLED and
+                                             # violate the token-level encoder contract (§5)
+        detection_window_days: 30            # ATCAT was trained on 30d-before-first-detection
+                                             # through last-detection; outside is out of
+                                             # distribution per its model card
+        detection_snr: 5.0                   # what counts as a "detection" for that window
+        subsample_seed: 0                    # seeds the per-object downsample (stable across runs)
+    out_dim: 384                             # ATCAT's hidden width, not AION's 768
+    max_tokens: 243                          # ATCAT's ONNX sequence length is STATIC — not a knob
+
 dropout:
   # MILESTONE 1 OF 3 — see README.md's "Where this is headed" section for the full roadmap
   # (single-modality baseline -> restore joint -> add a 3rd modality + scale up the Q-Former).
@@ -36,8 +53,12 @@ dropout:
   # typically need to grow alongside the registry, not just this weighting.
   subset_weights:
     - subset: [image]
-      weight: 0.5
+      weight: 0.4
     - subset: [spectra]
-      weight: 0.5
+      weight: 0.3
+    - subset: [lightcurve]
+      weight: 0.3
     - subset: [image, spectra]
+      weight: 0.0
+    - subset: [image, lightcurve]
       weight: 0.0

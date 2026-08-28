@@ -20,7 +20,9 @@
 d_shared: 384
 
 qformer:
-  n_queries: 32
+  n_queries: 48        # raised from 32 when `lightcurve` was added — see the note above:
+                       # more modalities => more subset combinations competing for the same
+                       # fixed-size prefix, and query count is the first knob to open.
   d_model: 384
   n_layers: 3
   n_heads: 6

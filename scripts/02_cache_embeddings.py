@@ -4,8 +4,9 @@ float16 shards + an index parquet (§5). Training never imports this module's en
 
 Both field schemas are confirmed against real data: spectra via AstroBridge-Data's `spectrum`
 struct (`flux`/`ivar`/`lambda`/`mask`), image via `legacy_south_all_images.parquet`'s
-`image_legacy` (list of per-band `{band, flux, mask, ivar, psf_fwhm, scale}` structs) — see
-data/image_dataset.py and the two batch loaders below.
+`image_legacy` (list of per-band `{band, flux, mask, ivar, psf_fwhm, scale}` structs), and light
+curves via BuildNg/astrobridge-transients-dataset's `atcat_*` arrays — see data/image_dataset.py,
+data/transients_dataset.py and the three batch loaders below.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import torch
 from pathlib import Path
 
 from captioner.data.cache import cache_modality, verify_fp16_roundtrip
+from captioner.data.transients_dataset import prepare_lightcurve_arrays
 from captioner.encoders.registry import build_encoder
 from captioner.utils.config import load_config, remaining_argv
 from captioner.utils.logging import get_logger
@@ -62,6 +64,51 @@ def _spectra_batch_loader(raw_by_id: dict):
             "mask": mask_tensor,
             "survey": survey,
         }
+
+    return _load
+
+
+def _lightcurve_batch_loader(raw_by_id: dict, modality_cfg):
+    """Builds ATCAT's five fixed-length inputs from the transients table.
+
+    All the selection logic — accepted-point masking, detection-window trimming, seeded
+    downsampling, padding to ATCAT's static 243 — lives in data/transients_dataset.py's
+    `prepare_lightcurve_arrays`, kept numpy-only so it is testable without a GPU stack. This
+    closure only stacks per-object arrays into a batch and reports what was downsampled.
+    """
+    kwargs = modality_cfg.encoder.get("kwargs", {})
+    seq_len = int(modality_cfg.max_tokens)
+    window_days = float(kwargs.get("detection_window_days", 30.0))
+    detection_snr = float(kwargs.get("detection_snr", 5.0))
+    seed = int(kwargs.get("subsample_seed", 0))
+
+    def _load(object_ids: list[str]) -> dict[str, torch.Tensor]:
+        stacked: dict[str, list] = {k: [] for k in ("flux", "flux_err", "time", "mask", "channel_index")}
+        for oid in object_ids:
+            row = raw_by_id[oid]
+            arrays, info = prepare_lightcurve_arrays(
+                row["lc_mjd"],
+                row["atcat_flux"],
+                row["atcat_flux_error"],
+                row["atcat_band_id"],
+                row["atcat_use"],
+                object_id=oid,
+                seq_len=seq_len,
+                detection_window_days=window_days,
+                detection_snr=detection_snr,
+                seed=seed,
+            )
+            if info["downsampled"]:
+                logger.warning(
+                    f"[lightcurve] {oid}: {info['n_in_window']} accepted points inside the "
+                    f"detection window exceeds ATCAT's fixed sequence length {seq_len}; kept "
+                    f"{info['n_selected']} chosen uniformly at random "
+                    f"({info['n_selected'] / info['n_in_window']:.0%} of them, seeded per object "
+                    "so re-runs are identical)."
+                )
+            for key, value in arrays.items():
+                stacked[key].append(value)
+        return {k: torch.from_numpy(np.stack(v, axis=0)) for k, v in stacked.items()}
 
     return _load
 
@@ -186,6 +233,15 @@ def main() -> None:
         spectra_df = load_spectra_table(cfg.sources.spectra.hf_path, revision=cfg.sources.spectra.get("revision"))
         spectra_by_id = spectra_df.set_index("object_id").to_dict(orient="index")
 
+    transients_by_id = None
+    if "lightcurve" in modality_names:
+        from captioner.data.transients_dataset import load_transients_table
+
+        transients_df = load_transients_table(
+            cfg.sources.transients.hf_path, revision=cfg.sources.transients.get("revision")
+        )
+        transients_by_id = transients_df.set_index("object_id").to_dict(orient="index")
+
     image_pixels_by_id = None
     if "image" in modality_names:
         from captioner.data.image_dataset import load_image_flux_pixels
@@ -206,6 +262,8 @@ def main() -> None:
             loader = _spectra_batch_loader(spectra_by_id)
         elif name == "image":
             loader = _image_batch_loader(image_pixels_by_id, list(modality_cfg.encoder.kwargs.get("bands", [])))
+        elif name == "lightcurve":
+            loader = _lightcurve_batch_loader(transients_by_id, modality_cfg)
         else:
             raise NotImplementedError(
                 f"No batch loader wired for modality {name!r} yet — add one here when the "
@@ -229,10 +287,11 @@ def main() -> None:
             excluded_mask = manifest["object_id"].isin(excluded_ids)
             manifest.loc[excluded_mask, flag_col] = False
             if "tier" in manifest.columns:
-                manifest.loc[excluded_mask, "tier"] = np.where(
-                    manifest.loc[excluded_mask, "has_spectra"] & manifest.loc[excluded_mask, "has_image"],
-                    "joint", "single",
-                )
+                # Mirrors data/manifest.py's rule — joint iff more than one modality present —
+                # derived from the flag columns rather than a hardcoded has_spectra/has_image pair.
+                flag_cols = [c for c in manifest.columns if c.startswith("has_")]
+                n_present = manifest.loc[excluded_mask, flag_cols].sum(axis=1)
+                manifest.loc[excluded_mask, "tier"] = np.where(n_present >= 2, "joint", "single")
             manifest_dirty = True
 
     if manifest_dirty:
