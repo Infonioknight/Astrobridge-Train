@@ -20,14 +20,31 @@ sources:
     hf_path: ibrahimhabibeg/spectra_captions_dataset
     filename: captions_combined_v1_gemini-3_7-flash_20260820_073856_filtered.jsonl
     revision: null
+  transients:
+    # 987 ZTF BTS supernovae with accepted alert photometry — the only source of time-domain data.
+    # Its `object_id` is a ZTF designation, a namespace shared with nothing else here, so these
+    # objects are APPENDED to the manifest as new rows rather than joined (see data/manifest.py).
+    # The host-image columns (`image_flux`, `display_image`, `host_image_caption`) are debugging
+    # artifacts and are deliberately never read — transients contribute the lightcurve tier only.
+    hf_path: BuildNg/astrobridge-transients-dataset
+    revision: null   # not loaded via `datasets.load_dataset` — see data/transients_dataset.py
 
 join:
   key: _healpix_29
   fallback_radius_arcsec: 1.0   # coordinate crossmatch radius when `key` isn't in both tables
 
 splits:
-  # train is implicit (everything not assigned to val/test). val/test are always drawn from
-  # joint-tier objects only, and unpaired objects always go to train — see manifest.py.
+  # train is implicit (everything not assigned to val/test). val/test are drawn according to
+  # `policy` below, and unpaired objects always go to train — see manifest.py.
+  policy: stratified
+  # stratified | joint_only | auto.
+  #   auto       - the original behaviour: joint-only when there are at least
+  #                sanity.min_joint_objects of them, otherwise stratified across all tiers.
+  #   stratified - always draw val/test from all tiers, stratified by tier.
+  #   joint_only - always draw from joint-tier objects only.
+  # Pinned to `stratified` deliberately rather than left on `auto`: `auto` silently changes the
+  # meaning of val/test as soon as the joint count crosses min_joint_objects, which would make
+  # val_loss incomparable across runs for a reason nothing in the logs points at.
   val: 0.1
   test: 0.1
   seed: ${seed}          # resolved from base.yaml at load time

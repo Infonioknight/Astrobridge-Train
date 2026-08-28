@@ -92,7 +92,10 @@ def generate_caption(
 ) -> str:
     """`raw_inputs`: {modality_name: encoder-specific batch dict}, only for modalities actually
     present — e.g. {"image": {"pixel_values": ...}} or
-    {"spectra": {"flux": ..., "ivar": ..., "mask": ..., "wavelength": ..., "survey": [...]}}.
+    {"spectra": {"flux": ..., "ivar": ..., "mask": ..., "wavelength": ..., "survey": [...]}}, or
+    {"lightcurve": {"flux": ..., "flux_err": ..., "time": ..., "mask": ..., "channel_index": ...}}
+    (build that one with data/transients_dataset.py's `prepare_lightcurve_arrays`, so live inference
+    applies exactly the same detection-window trim and padding the cache was built with).
     See each encoder's `encode()` docstring (encoders/aion_image.py, aion_spectrum.py) for the
     exact field contract. A modality absent from `raw_inputs` is treated as not shown at all —
     true exclusion (all-True mask), never a zero-content placeholder (§6).

@@ -66,3 +66,66 @@ def test_uses_joint_only_when_above_threshold():
 
     non_train = result[result["split"] != "train"]
     assert (non_train["tier"] == "joint").all()
+
+
+def _cfg_policy(policy: str, min_joint: int = 500):
+    return OmegaConf.create(
+        {"splits": {"val": 0.1, "test": 0.1, "seed": 0, "policy": policy},
+         "sanity": {"min_joint_objects": min_joint}}
+    )
+
+
+def test_policy_defaults_to_auto_when_absent():
+    """Configs predating splits.policy must behave exactly as before."""
+    manifest = _synthetic_manifest(n_joint=40, n_single=60)
+    result = assign_splits(manifest, _cfg())
+    non_train = result[result["split"] != "train"]
+    assert (non_train["tier"] == "joint").all()
+
+
+def test_stratified_policy_ignores_a_plentiful_joint_tier():
+    """The reason the policy exists: adding a source that pushes the joint count past
+    min_joint_objects would otherwise silently flip val/test onto joint-tier objects only, making
+    val_loss incomparable across runs for a reason nothing in the logs points at.
+    """
+    manifest = _synthetic_manifest(n_joint=600, n_single=600)
+    result = assign_splits(manifest, _cfg_policy("stratified"))
+    non_train = result[result["split"] != "train"]
+    assert set(non_train["tier"]) == {"joint", "single"}
+    assert result.groupby("object_id")["split"].nunique().max() == 1
+
+
+def test_joint_only_policy_forces_joint_even_below_threshold():
+    manifest = _synthetic_manifest(n_joint=40, n_single=60)
+    result = assign_splits(manifest, _cfg_policy("joint_only"))
+    non_train = result[result["split"] != "train"]
+    assert (non_train["tier"] == "joint").all()
+
+
+def test_joint_only_policy_raises_when_no_joint_objects_exist():
+    """Empty val/test makes evaluate_loss return a fake 0.0 every epoch, which early stopping reads
+    as 'no improvement' — silent truncation. Fail loudly instead."""
+    manifest = _synthetic_manifest(n_joint=0, n_single=60)
+    try:
+        assign_splits(manifest, _cfg_policy("joint_only"))
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "joint_only" in str(e)
+
+
+def test_unknown_policy_raises():
+    manifest = _synthetic_manifest()
+    try:
+        assign_splits(manifest, _cfg_policy("nonsense"))
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "not recognised" in str(e)
+
+
+def test_lightcurve_only_objects_are_eligible_under_stratified():
+    """Transients are lightcurve-only, i.e. single-tier. They must be able to reach val/test."""
+    rows = [{"object_id": f"lc_{i}", "tier": "single", "has_image": False,
+             "has_spectra": False, "has_lightcurve": True} for i in range(100)]
+    result = assign_splits(pd.DataFrame(rows), _cfg_policy("stratified"))
+    assert (result["split"] == "val").sum() > 0
+    assert (result["split"] == "test").sum() > 0

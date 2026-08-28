@@ -1,7 +1,7 @@
 # captioner
 
-Trains a model that writes captions for astronomy images and spectra. Follow these steps in
-order — each one should just work if the one before it did.
+Trains a model that writes captions for astronomy images, spectra and light curves. Follow these
+steps in order — each one should just work if the one before it did.
 
 ## 1. Install
 
@@ -21,6 +21,10 @@ these three pages (click "Agree", approval isn't always instant):
 - https://huggingface.co/polymathic-ai/aion-base
 - https://huggingface.co/Qwen/Qwen3.5-9B
 
+Two more sources are pulled automatically and need no access request — both are public:
+- https://huggingface.co/datasets/BuildNg/astrobridge-transients-dataset (ZTF light curves)
+- https://huggingface.co/light-curve/atcat (the light-curve encoder, a ~12MB ONNX model)
+
 ## 3. Check access actually works
 
 ```bash
@@ -36,7 +40,7 @@ before moving on, don't skip ahead.
 make test
 ```
 
-Should finish with `73 passed`. Runs in seconds, no GPU needed. **If this isn't green, stop and
+Should finish with `120 passed`. Runs in seconds, no GPU needed. **If this isn't green, stop and
 get help — nothing below this is trustworthy until it is.**
 
 ## 5. Build the data (no GPU needed)
@@ -44,12 +48,16 @@ get help — nothing below this is trustworthy until it is.**
 ```bash
 make manifest
 make captions
+python scripts/02_cache_embeddings.py --modality lightcurve --device cpu
 ```
+
+That last line encodes the ZTF light curves with ATCAT, which is small enough to run on CPU in
+seconds. AION — the image and spectra encoder — is the one that needs a GPU, below.
 
 ## 6. Everything below needs a GPU
 
 ```bash
-make cache                              # one-time: encode images + spectra
+make cache                              # encode images + spectra (redoes light curves too; harmless)
 make stage1                             # trains the fusion stack (LLM frozen)
 make eval CKPT=outputs/checkpoints/stage1/best   # sanity-check the result
 make stage2                             # only run this if step above looks good — LoRA on the LLM
@@ -74,9 +82,12 @@ python scripts/07_infer.py --checkpoint-dir outputs/checkpoints/stage2/best \
     --image-npy path/to/cutout.npy --question "What kind of object is this?"
 ```
 
-Runs the encoders live on a brand-new image/spectrum (not part of the manifest/cache) and asks
-the model your own free-form question — see `scripts/07_infer.py`'s docstring for the exact
-input format, and `test_subjects/` for 5 real image/spectrum examples to try it on immediately.
+Swap `--image-npy` for `--spectrum-npz ... --spectrum-survey desi` or `--lightcurve-npz ...`, or
+pass several at once to condition the answer on more than one modality.
+
+Runs the encoders live on a brand-new object (not part of the manifest/cache) and asks the model
+your own free-form question — see `scripts/07_infer.py`'s docstring for the exact input format,
+and `test_subjects/` for 5 image, 5 spectrum and 5 light-curve examples to try it on immediately.
 
 ## Multiple GPUs on one machine?
 

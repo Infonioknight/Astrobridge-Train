@@ -42,6 +42,7 @@ from captioner.data.captions import (
 )
 from captioner.data.image_dataset import load_image_captions_table
 from captioner.data.spectra_dataset import load_gemini_spectra_captions, load_spectra_table
+from captioner.data.transients_dataset import load_transient_captions
 from captioner.eval.claims import claim_kind_histogram, validate_all
 from captioner.utils.config import load_config
 from captioner.utils.logging import get_logger
@@ -81,6 +82,20 @@ def main() -> None:
     )
     image_caption_by_object = image_captions_df.set_index("object_id")["caption_blind"].to_dict()
 
+    # Transients ship their own caption. It is NOT pre-vetted the way caption_blind and the Gemini
+    # spectra captions are: measured on 30 sampled rows, 30/30 name a catalog designation, quote a
+    # spectroscopic redshift, or say "classified in literature as" — none of which a light curve can
+    # support. So unlike the other two sources this one goes through decompose_object, whose
+    # lightcurve-scoped veto drops those sentences and keeps the photometric ones.
+    transient_caption_by_object: dict[str, str] = {}
+    if "transients" in cfg.sources:
+        transient_captions_df = load_transient_captions(
+            cfg.sources.transients.hf_path, revision=cfg.sources.transients.get("revision")
+        )
+        transient_caption_by_object = (
+            transient_captions_df.set_index("object_id")["transient_caption"].to_dict()
+        )
+
     all_captions: list[Caption] = []
     n_source_sentences = 0
     n_surviving = 0
@@ -88,12 +103,20 @@ def main() -> None:
     n_image_available = 0
     n_spectra_from_gemini = 0
     n_spectra_available = 0
+    n_lightcurve_available = 0
+    n_lightcurve_kept = 0
+    n_lightcurve_fully_vetoed = 0
+    n_lightcurve_source_sentences = 0
+    n_lightcurve_surviving = 0
     n_no_usable_text = 0
+    class_label_by_object: dict[str, str] = {}
 
     for _, row in manifest.iterrows():
         object_id = row["object_id"]
+        # Derived from the manifest's own has_<modality> columns rather than a hardcoded tuple, so
+        # adding a modality needs no change here.
         available = frozenset(
-            m for m in ("image", "spectra") if bool(row.get(f"has_{m}", False))
+            c[len("has_") :] for c in manifest.columns if c.startswith("has_") and bool(row[c])
         )
         if not available:
             continue
@@ -150,12 +173,50 @@ def main() -> None:
                 )
                 n_spectra_from_gemini += 1
 
+        if "lightcurve" in available:
+            n_lightcurve_available += 1
+            raw_caption = transient_caption_by_object.get(object_id)
+            if raw_caption:
+                n_lightcurve_source_sentences += len(_split_sentences(raw_caption))
+                lc_claims = decompose_object(
+                    object_id=object_id,
+                    mention_summary=raw_caption,
+                    evidence_quotes=None,
+                    # becomes the provenance prefix, e.g. "transient_lc:ZTF18AAJPJDI#sent2"
+                    arxiv_id=f"transient_lc:{object_id}",
+                    available_modalities=frozenset({"lightcurve"}),
+                    generator=cfg.captions.generator,
+                )
+                n_lightcurve_surviving += len(lc_claims)
+                if lc_claims:
+                    claims.extend(lc_claims)
+                    n_lightcurve_kept += 1
+                else:
+                    # Every sentence was literature-derived. Excluded rather than fudged, exactly
+                    # as an object with no caption_blind match is — CaptionerDataset drops it.
+                    n_lightcurve_fully_vetoed += 1
+
+        if "class_label" in row and not pd.isna(row.get("class_label")):
+            class_label_by_object[object_id] = row["class_label"]
+
         if not claims:
             n_no_usable_text += 1
             continue
 
         captions = compose_captions(object_id, claims, available)
         all_captions.extend(captions)
+
+    lc_survival = (
+        n_lightcurve_surviving / n_lightcurve_source_sentences if n_lightcurve_source_sentences else None
+    )
+    if lc_survival is not None and lc_survival < 0.3:
+        logger.warning(
+            f"Only {lc_survival:.1%} of transient_caption sentences survived the lightcurve veto "
+            f"({n_lightcurve_surviving}/{n_lightcurve_source_sentences}), and "
+            f"{n_lightcurve_fully_vetoed} objects lost their caption entirely. The veto is a "
+            "keyword filter — read outputs/captions/manual_review_sample.jsonl before training to "
+            "check it is not discarding legitimate photometry."
+        )
 
     violations = validate_all(all_captions)
     survival_rate = claim_survival_rate(n_source_sentences, n_surviving)
@@ -196,6 +257,14 @@ def main() -> None:
         "spectra_caption_match_rate": spectra_caption_match_rate,
         "n_gemini_captions_total": len(gemini_captions_df),
         "n_gemini_unmatched_wiki_id": n_gemini_unmatched_wiki_id,
+        "n_lightcurve_available": n_lightcurve_available,
+        "n_lightcurve_captions_kept": n_lightcurve_kept,
+        "n_lightcurve_objects_fully_vetoed": n_lightcurve_fully_vetoed,
+        "lightcurve_claim_survival_rate": (
+            n_lightcurve_surviving / n_lightcurve_source_sentences
+            if n_lightcurve_source_sentences
+            else None
+        ),
         "n_objects_with_no_usable_text": n_no_usable_text,
         "generator": cfg.captions.generator,
     }
@@ -212,6 +281,8 @@ def main() -> None:
                 "n_claims": len(c.claims),
                 "source": c.source,
                 "generator": c.generator,
+                # Structured metadata for eval slicing only — never concatenated into caption text.
+                "class_label": class_label_by_object.get(c.object_id),
             }
             for c in all_captions
         ]

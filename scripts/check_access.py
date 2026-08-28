@@ -59,6 +59,28 @@ def main() -> None:
         _check_image_files,
     )
 
+    if "transients" in cfg.sources:
+        results["transients dataset"] = _check(
+            f"dataset access: {cfg.sources.transients.hf_path}",
+            lambda: api.dataset_info(cfg.sources.transients.hf_path),
+        )
+
+    if "lightcurve" in cfg.modalities:
+        lc_encoder = cfg.modalities.lightcurve.encoder
+        onnx_file = lc_encoder.get("kwargs", {}).get("onnx_file", "atcat_f32.onnx")
+
+        def _check_atcat():
+            files = api.list_repo_files(lc_encoder.hf_path)
+            if onnx_file not in files:
+                raise FileNotFoundError(
+                    f"{onnx_file} not found in {lc_encoder.hf_path} — the lightcurve encoder "
+                    "depends on this exact filename; check configs/modalities.yaml."
+                )
+
+        results["ATCAT model"] = _check(
+            f"model access: {lc_encoder.hf_path} ({onnx_file})", _check_atcat
+        )
+
     aion_path = cfg.modalities.image.encoder.hf_path  # same repo for both modalities today
     results["AION model"] = _check(
         f"model access: {aion_path}",
