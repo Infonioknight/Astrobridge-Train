@@ -81,7 +81,7 @@ class CaptionerDataset(Dataset):
         }
         # Per-object set of subsets that actually have a caption — NOT the same as "data is
         # present for this subset". Confirmed real gap: spectra-tier captions are restricted to
-        # only the ~1,223 Gemini-covered objects (deliberate, no rule-based fallback — see
+        # only the ~2,021 Gemini-covered objects (deliberate, no rule-based fallback — see
         # 01_generate_captions.py), so most has_spectra=True objects have spectrum embeddings
         # but no caption for subset={"spectra"}. Sampling `available` alone (has_<modality>
         # flags) would pick that subset anyway, land on an empty caption_text, and produce a

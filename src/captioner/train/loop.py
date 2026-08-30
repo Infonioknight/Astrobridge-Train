@@ -64,7 +64,7 @@ def _is_degenerate_batch(batch: dict) -> bool:
     all shared across the batch). Confirmed real cause: `data/dataset.py`'s subset sampling used
     to consider a subset "available" purely from has_<modality> manifest flags, without checking
     whether a caption actually exists for that (object_id, subset) pair — e.g. spectra-tier
-    captions only cover ~1,223 of the has_spectra=True objects. That's fixed at the source now
+    captions only cover ~2,021 of the has_spectra=True objects. That's fixed at the source now
     (dataset.py only samples captioned subsets), but this is kept as a second line of defense —
     skip and warn rather than silently train on/report a NaN.
     """

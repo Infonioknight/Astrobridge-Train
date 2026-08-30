@@ -6,8 +6,10 @@ steps in order — each one should just work if the one before it did.
 ## 1. Install
 
 ```bash
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 ```
+
+(no `uv`? `pip install uv` first, or see https://docs.astral.sh/uv/getting-started/installation/)
 
 ## 2. Log into Hugging Face
 

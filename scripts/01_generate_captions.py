@@ -5,9 +5,9 @@ a sample written out for the required manual read of 50 captions spanning both t
 
 Three caption sources, kept deliberately separate:
   - spectra: a teammate-produced, spectrum-grounded LLM caption set (Gemini —
-    ibrahimhabibeg/spectra_captions_dataset, see data/spectra_dataset.py:
-    load_gemini_spectra_captions). Covers a subset of objects (1,223 as of the configured
-    filename). Deliberate scope choice: spectra-tier captions are restricted to ONLY this set
+    UniverseTBD/AstroBridge-Data's captions/spectra/*.jsonl, see data/spectra_dataset.py:
+    load_gemini_spectra_captions). Covers a subset of objects (2,021 as of the configured
+    filename, v2). Deliberate scope choice: spectra-tier captions are restricted to ONLY this set
     for now — objects with spectra but no Gemini caption get no spectra-tier caption at all,
     same asymmetry the image side already has (not every has_image object has a caption_blind
     match either). No fallback to mention_summary decomposition for the rest.

@@ -6,7 +6,7 @@ ACCELERATE_CONFIG ?= configs/accelerate_ddp.yaml
 .PHONY: test manifest captions cache stage1 eval stage2 install check-access publish infer
 
 install:
-	pip install -e ".[dev]"
+	uv pip install -e ".[dev]"
 
 test:
 	pytest -q tests/

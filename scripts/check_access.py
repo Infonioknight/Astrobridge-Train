@@ -101,7 +101,7 @@ def main() -> None:
         logger.error(f"{n_total - n_ok}/{n_total} checks failed.")
         logger.error(
             "For gated repos: request access on the HF page, wait for approval, then re-run "
-            "this check. Also confirm you're logged in (`huggingface-cli login` or `HF_TOKEN` "
+            "this check. Also confirm you're logged in (`hf auth login` or `HF_TOKEN` "
             "set) on THIS machine — access granted on your account doesn't help if this "
             "environment isn't authenticated."
         )

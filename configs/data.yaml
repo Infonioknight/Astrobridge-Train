@@ -13,12 +13,14 @@ sources:
                       # No `split` here: it's loaded as raw file pairs, not a HF Dataset split.
   spectra_captions:
     # Teammate-produced, spectrum-grounded LLM captions (Gemini) — the spectra-tier equivalent
-    # of gapatron's caption_blind for images. Covers a subset of objects (1,223 as of this
-    # filename); spectra-tier captions are restricted to just this set for now (see
-    # scripts/01_generate_captions.py) rather than falling back to mention_summary decomposition
-    # for the rest — a deliberate scope choice, not a limitation of the loader.
-    hf_path: ibrahimhabibeg/spectra_captions_dataset
-    filename: captions_combined_v1_gemini-3_7-flash_20260820_073856_filtered.jsonl
+    # of gapatron's caption_blind for images. Spectra-tier captions are restricted to just the
+    # objects this file covers (see scripts/01_generate_captions.py) rather than falling back to
+    # mention_summary decomposition for the rest — a deliberate scope choice, not a limitation
+    # of the loader. v2: now hosted directly in AstroBridge-Data rather than a separate personal
+    # repo — confirmed live: 2,021 usable captions (up from 1,223 in v1), object_key format
+    # (gmw_XXXXXXXX) still matches the spectra table's wiki_entity_id column.
+    hf_path: UniverseTBD/AstroBridge-Data
+    filename: captions/spectra/desi_sdss_combined_v2_gemini-3_7-flash.jsonl
     revision: null
   transients:
     # 987 ZTF BTS supernovae with accepted alert photometry — the only source of time-domain data.

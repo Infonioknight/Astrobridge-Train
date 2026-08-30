@@ -181,6 +181,17 @@ def build_manifest(cfg: DictConfig) -> tuple[pd.DataFrame, dict]:
         if f"has_{name}" not in merged_key.columns:
             merged_key[f"has_{name}"] = False
 
+    # Confirmed real: spectra's object_id can be a genuine Python int (DESI's numeric target ids)
+    # while image/transients object_ids are strings (Legacy Survey brick-style names like
+    # '0001m057-6125', ZTF designations). After any of the merge/concat paths above — including
+    # the transients append — pandas can end up holding both kinds in one `object`-dtype column.
+    # pyarrow then infers a single Arrow type from a sample and fails the moment it hits a value
+    # that doesn't fit ("Could not convert '0001m057-6125' ... tried to convert to int64").
+    # object_id is only ever used as an opaque lookup key downstream (dict/index, never
+    # arithmetic), so normalizing to a uniform string here — once, after every path has already
+    # run — is always safe and loses no real information.
+    merged_key["object_id"] = merged_key["object_id"].astype(str)
+
     modality_names = _modality_names_from_flags(merged_key)
     for name in modality_names:
         col = f"has_{name}"

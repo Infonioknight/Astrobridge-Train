@@ -64,6 +64,38 @@ def _cfg_with_transients():
     return cfg
 
 
+def test_object_id_is_uniformly_stringified_across_mixed_source_dtypes(tmp_path):
+    """Confirmed real: DESI's numeric target ids arrive as genuine Python int, while other
+    sources use string ids (Legacy Survey brick-style names, ZTF designations). Left mixed, the
+    resulting `object` dtype column crashes on to_parquet — pyarrow infers one Arrow type from a
+    sample (often int64, since ints usually appear first) and errors the moment it hits a real
+    string ("Could not convert '0001m057-6125' ... tried to convert to int64"). object_id is only
+    ever used as an opaque lookup key downstream, so normalizing to str must happen regardless of
+    which source contributed which type.
+    """
+    spectra_df = pd.DataFrame(
+        {"object_id": [39627939041510701, 39633282643528688], "ra_spectra": [1.0, 2.0],
+         "dec_spectra": [1.0, 2.0], "has_spectra": [True, True]}
+    )
+    image_df = pd.DataFrame({"object_id": [39627939041510701], "ra": [1.0], "dec": [1.0], "has_image": [True]})
+    transients_df = pd.DataFrame(
+        {
+            "object_id": ["0001m057-6125"],  # a real, non-numeric string id from another source
+            "class_label": ["SN Ia"], "lc_mjd": [[1.0]], "atcat_length": [1], "has_lightcurve": [True],
+        }
+    )
+
+    with patch("captioner.data.manifest._load_spectra_table", return_value=spectra_df), patch(
+        "captioner.data.manifest._load_image_table", return_value=image_df
+    ), patch("captioner.data.manifest._load_transients_table", return_value=transients_df):
+        manifest, _ = build_manifest(_cfg_with_transients())
+
+    assert manifest["object_id"].apply(type).eq(str).all()
+    # The actual real-world failure mode: this must not raise.
+    manifest.to_parquet(tmp_path / "manifest.parquet", index=False)
+    assert set(manifest["object_id"]) == {"39627939041510701", "39633282643528688", "0001m057-6125"}
+
+
 def test_transients_are_appended_not_joined():
     """A ZTF designation shares no namespace with AstroBridge-Data's object_id, so transients must
     arrive as NEW manifest rows carrying has_lightcurve only — never merged onto an existing row,
