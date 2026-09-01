@@ -16,7 +16,12 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from captioner.data.spectra_dataset import load_spectra_table, _deduplicate_by_object_id
+from captioner.data.spectra_dataset import (
+    load_spectra_table,
+    _canonical_object_id,
+    _canonicalize_object_ids,
+    _deduplicate_by_object_id,
+)
 
 
 def test_concatenates_files_with_different_columns(tmp_path):
@@ -152,3 +157,97 @@ def test_load_spectra_table_result_is_never_duplicated(tmp_path):
     assert df["object_id"].is_unique
     # This is the exact operation that crashed in production — must succeed now.
     df.set_index("object_id")[["mention_summary"]].to_dict(orient="index")
+
+
+def test_canonical_object_id_collapses_every_real_spelling():
+    """The three spellings the real files actually use for one object (see
+    `_canonical_object_id`'s docstring) must all reduce to the same string.
+    """
+    assert _canonical_object_id("b'    462849895556999168'") == "462849895556999168"
+    assert _canonical_object_id(462849895556999168) == "462849895556999168"
+    assert _canonical_object_id("462849895556999168") == "462849895556999168"
+    assert _canonical_object_id(b"    462849895556999168") == "462849895556999168"
+    # A plain id that merely starts with "b" is not a bytes repr and must survive untouched.
+    assert _canonical_object_id("b1234") == "b1234"
+    assert _canonical_object_id("0441p020-5245") == "0441p020-5245"
+
+
+def test_missing_object_id_is_rejected_not_canonicalized_to_nan():
+    df = pd.DataFrame({"object_id": ["a", None], "mention_summary": ["x", "y"]})
+    try:
+        _canonicalize_object_ids(df)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "object_id" in str(e)
+
+
+def test_one_object_spelled_three_ways_yields_one_row(tmp_path):
+    """The exact production failure: the same object arrives as a plain digit string, as int64,
+    and as a stringified bytes repr, so it reached the manifest under ids that look unrelated and
+    `make cache` raised `KeyError: '299516890357721088'` looking one of them up.
+    """
+    pd.DataFrame({
+        "object_id": ["39632951360620188"],
+        "mention_summary": ["desi text"],
+        "_dist_arcsec": [0.5],
+    }).to_parquet(tmp_path / "desi_crossmatch.parquet")
+
+    pd.DataFrame({
+        "object_id": ["b'    462849895556999168'"],
+        "mention_summary": ["sdss text"],
+        "_dist_arcsec": [0.4],
+    }).to_parquet(tmp_path / "sdss_crossmatch.parquet")
+
+    pd.DataFrame({
+        "object_id": [39632951360620188, 462849895556999168],  # int64: same two objects
+        "mention_summary": ["desi text again", "sdss text again"],
+        "survey": ["DESI", "SDSS"],
+        "_dist_arcsec": [0.1, 0.9],
+    }).to_parquet(tmp_path / "desi_sdss_subset_crossmatch.parquet")
+
+    with patch(
+        "huggingface_hub.list_repo_files",
+        return_value=[
+            "observations/spectra/desi_crossmatch.parquet",
+            "observations/spectra/sdss_crossmatch.parquet",
+            "observations/spectra/desi_sdss_subset_crossmatch.parquet",
+        ],
+    ), patch(
+        "huggingface_hub.hf_hub_download",
+        side_effect=lambda repo_id, filename, **k: str(tmp_path / Path(filename).name),
+    ):
+        df = load_spectra_table("UniverseTBD/AstroBridge-Data")
+
+    assert set(df["object_id"]) == {"39632951360620188", "462849895556999168"}
+    assert df["object_id"].is_unique
+    assert all(isinstance(oid, str) for oid in df["object_id"])
+    # Deduplication still tie-breaks on the crossmatch distance, now across all three spellings.
+    by_id = df.set_index("object_id")
+    assert by_id.loc["39632951360620188", "mention_summary"] == "desi text again"
+    assert by_id.loc["462849895556999168", "mention_summary"] == "sdss text"
+    # Survey routing (aion_spectrum.py depends on it) survives the collapse.
+    assert by_id.loc["39632951360620188", "survey"] == "desi"
+    assert by_id.loc["462849895556999168", "survey"] == "sdss"
+
+
+def test_manifest_str_ids_match_the_cache_lookup_keys(tmp_path):
+    """02_cache_embeddings.py keys its batch loader by the loader's raw `object_id` while asking
+    for the manifest's `astype(str)` version — this is what raised KeyError. Same keys now.
+    """
+    pd.DataFrame({
+        "object_id": [462849895556999168],
+        "mention_summary": ["from the int64 file"],
+    }).to_parquet(tmp_path / "sdss_crossmatch.parquet")
+
+    with patch(
+        "huggingface_hub.list_repo_files",
+        return_value=["observations/spectra/sdss_crossmatch.parquet"],
+    ), patch(
+        "huggingface_hub.hf_hub_download",
+        side_effect=lambda repo_id, filename, **k: str(tmp_path / Path(filename).name),
+    ):
+        df = load_spectra_table("UniverseTBD/AstroBridge-Data")
+
+    raw_by_id = df.set_index("object_id").to_dict(orient="index")
+    manifest_object_id = df["object_id"].astype(str).iloc[0]  # what manifest.py writes out
+    assert raw_by_id[manifest_object_id]["mention_summary"] == "from the int64 file"

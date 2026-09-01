@@ -3,8 +3,10 @@ projectors, modality_identity, qformer, adapter — exactly `configs/stage1.yaml
 
 Single-node multi-GPU via `accelerate` (DDP): each process loads a full copy of the model
 normally (no `device_map="auto"` — that's model-parallel, incompatible with DDP) and
-`accelerator.prepare(...)` places it on that process's GPU and wraps it for gradient
-synchronization. Launch with `accelerate launch scripts/03_train_stage1.py ...` — see
+`accelerator.prepare(...)` wraps it for gradient synchronization. GPU placement is done by
+`build_llm_staggered` one rank at a time instead of by `prepare`, which would otherwise have
+every rank pay a ~15 GiB host-RAM transient simultaneously and OOM under a memory-capped
+Slurm cgroup — see that function's docstring for the measurements. Launch with `accelerate launch scripts/03_train_stage1.py ...` — see
 `captioner/README.md`'s cluster section for the `accelerate config` this expects.
 """
 from __future__ import annotations
@@ -44,7 +46,11 @@ def _cosine_with_warmup(optimizer, total_steps: int, warmup_frac: float):
     return LambdaLR(optimizer, lr_lambda)
 
 
-def build_llm(model_cfg: DictConfig):
+def build_llm(model_cfg: DictConfig, device=None):
+    """Loads the frozen LLM. `device` (when given) places it before returning — see
+    `build_llm_staggered` for why the placement belongs here rather than being left to
+    `accelerator.prepare()` under multi-GPU DDP.
+    """
     logger.info(f"Loading tokenizer for {model_cfg.llm.name} ...")
     trust_remote_code = bool(model_cfg.llm.get("trust_remote_code", False))
     tokenizer = AutoTokenizer.from_pretrained(model_cfg.llm.name, trust_remote_code=trust_remote_code)
@@ -96,6 +102,45 @@ def build_llm(model_cfg: DictConfig):
     logger.info(f"LLM weights loaded ({n_params:,} parameters). Freezing and continuing.")
     for p in llm.parameters():
         p.requires_grad = False
+    if device is not None:
+        llm = llm.to(device)
+    return llm, tokenizer
+
+
+def build_llm_staggered(model_cfg: DictConfig, accelerator):
+    """Loads the LLM one rank at a time, each placing it on its own GPU before the next starts.
+
+    Measured directly on this build (Qwen3.5-9B bf16, 8.95B params, GH200): `from_pretrained`
+    itself is nearly free in host RAM — the weights come back mmap-backed, ~0.35 GiB resident.
+    Moving them to the GPU is what costs: RssAnon peaks at **14.66 GiB** during the transfer and
+    falls back to ~0.38 GiB once it completes, because the CPU-side weights stay alive until the
+    whole move finishes.
+
+    Left to `accelerator.prepare()`, every rank pays that transient at the same moment, so peak
+    host RAM is num_processes x 14.66 GiB — 58.6 GiB at 4 GPUs. Slurm caps this job's cgroup at
+    SLURM_MEM_PER_NODE (64 GiB here), so that plus the session's own footprint trips the kernel
+    OOM killer. It SIGKILLs a single rank; torch elastic then SIGTERMs the rest and reports a
+    bare `ChildFailedError` with `exitcode -9` and no traceback, naming nothing about memory.
+
+    Serializing just this step holds the peak at one rank's 14.66 GiB whatever the GPU count, at
+    the cost of a slower startup (each rank's transfer runs alone rather than all at once).
+    Nothing else in setup has a transient near this size, so nothing else is staggered.
+
+    Two alternatives were measured and rejected: `device_map={"": rank}` is *worse* (17.49 GiB
+    peak, since it stages through host memory too), and dropping to bf16 changes nothing because
+    the weights are already bf16. Raising the job's memory request is the other real fix — it
+    keeps the parallel load and costs nothing at runtime, so prefer it if you can get the RAM.
+    """
+    for turn in range(accelerator.num_processes):
+        if accelerator.local_process_index == turn:
+            if accelerator.num_processes > 1:
+                logger.info(
+                    f"Loading the LLM on rank {turn} ({turn + 1}/{accelerator.num_processes}) — "
+                    "ranks load one at a time so the ~15 GiB host-RAM transient of the CPU->GPU "
+                    "move is paid once rather than once per GPU. Startup is slower by design."
+                )
+            llm, tokenizer = build_llm(model_cfg, device=accelerator.device)
+        accelerator.wait_for_everyone()
     return llm, tokenizer
 
 
@@ -125,7 +170,7 @@ def run_stage1(cfg: DictConfig) -> None:
     captions = pd.read_parquet(cfg.captions.parquet)
     tier_histogram = json.loads(Path(cfg.manifest.stats).read_text())["tier_histogram"]
 
-    llm, tokenizer = build_llm(cfg)
+    llm, tokenizer = build_llm_staggered(cfg, accelerator)
     d_llm = get_llm_hidden_size(llm)
 
     out_dims = {n: int(c.out_dim) for n, c in cfg.modalities.items()}

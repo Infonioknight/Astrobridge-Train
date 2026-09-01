@@ -37,6 +37,12 @@ preferring the row with the smallest `_dist_arcsec` (the crossmatch quality metr
 the data) when duplicates disagree on it, since that's an objective tie-break rather than an
 arbitrary one based on file processing order.
 
+A fourth real issue, confirmed against the live repo, and the reason `_canonical_object_id`
+exists: the four files spell the *same* `object_id` three different ways — plain digit strings,
+int64, and a stringified Python bytes repr of a space-padded fixed-width FITS char field (the
+literal text `b'    462849895556999168'`). Canonicalizing is what lets the deduplication below
+actually collapse them; see that function's docstring for the two failures it caused.
+
 Separately: `load_gemini_spectra_captions` reads a *different*, teammate-produced dataset
 (`ibrahimhabibeg/spectra_captions_dataset`) — a JSONL file of LLM-generated (Gemini) captions,
 each grounded purely in one object's spectrum (no object names/coordinates in the prompt, per
@@ -53,6 +59,7 @@ map from the `spectra_df` it already loads.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -137,7 +144,69 @@ def load_spectra_table(
         frames.append(_attach_survey_column(_read_parquet(local_path), Path(f).name))
 
     combined = pd.concat(frames, ignore_index=True, sort=False)
-    return _deduplicate_by_object_id(combined)
+    return _deduplicate_by_object_id(_canonicalize_object_ids(combined))
+
+
+_BYTES_REPR_RE = re.compile(r"""b(['"])(?P<value>.*)\1""", re.DOTALL)
+
+
+def _canonical_object_id(value) -> str:
+    """One object, one id string — whichever source file the row came from.
+
+    Confirmed against the real repo, not a guess: the four spectra parquet files spell the same
+    `object_id` three different ways. `desi_crossmatch_...` stores plain digit strings
+    (`'39632951360620188'`); `desi_sdss_subset_crossmatch_...` stores int64
+    (`462849895556999168`); and `sdss_crossmatch_...` / `desi_sdss_crossmatch_...` store a
+    *stringified Python bytes repr* of a space-padded fixed-width FITS char field — the literal
+    text `b'    462849895556999168'`. All 15,198 rows across the four files reduce to 2,178 real
+    objects, every one present under two spellings whose ra/dec/name/wiki_entity_id agree exactly,
+    so collapsing them loses nothing.
+
+    Left unnormalized those spellings are distinct keys, so `_deduplicate_by_object_id` cannot
+    collapse them and the manifest ends up with two rows per object, which `manifest.py`'s
+    `astype(str)` then freezes. Two real failures follow. `make cache` dies with
+    `KeyError: '299516890357721088'`: the manifest asks for the stringified id while
+    02_cache_embeddings.py's `spectra_df.set_index("object_id").to_dict()` is still keyed by the
+    raw int. And every spectra object appears twice under ids that look unrelated, so
+    `assign_splits` can put one physical object in both train and val without tripping its own
+    per-object uniqueness assertion — a leak that would quietly flatter val loss.
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace").strip()
+    text = str(value).strip()
+    match = _BYTES_REPR_RE.fullmatch(text)
+    return match.group("value").strip() if match else text
+
+
+def _canonicalize_object_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """Applies `_canonical_object_id` to the whole column, before deduplication runs.
+
+    A null `object_id` is rejected rather than canonicalized: `str(nan)` is `'nan'`, so a file
+    missing the column entirely (pd.concat fills it with NaN) would otherwise collapse every one
+    of its rows onto a single bogus object rather than failing.
+    """
+    n_missing = int(df["object_id"].isna().sum())
+    if n_missing:
+        raise ValueError(
+            f"{n_missing} of {len(df)} spectra rows have no `object_id` — every row needs one to "
+            "be keyed, joined and cached by. Check whether a source file under "
+            f"{SPECTRA_DIR_PREFIX!r} is missing the column altogether."
+        )
+
+    df = df.copy()
+    canonical = df["object_id"].map(_canonical_object_id)
+    n_rewritten = int((canonical != df["object_id"].astype(str)).sum())
+    n_spellings, n_objects = df["object_id"].nunique(), canonical.nunique()
+    df["object_id"] = canonical
+
+    if n_rewritten or n_spellings != n_objects:
+        logger.info(
+            f"Canonicalized object_id across the source files: {n_rewritten}/{len(df)} rows were "
+            f"stored as a stringified bytes repr (b'...') or padded, and {n_spellings} distinct "
+            f"raw spellings resolve to {n_objects} distinct objects. Without this the same object "
+            "reaches the manifest under two unrelated-looking ids."
+        )
+    return df
 
 
 def _deduplicate_by_object_id(df: pd.DataFrame) -> pd.DataFrame:
