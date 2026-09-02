@@ -251,3 +251,63 @@ def test_manifest_str_ids_match_the_cache_lookup_keys(tmp_path):
     raw_by_id = df.set_index("object_id").to_dict(orient="index")
     manifest_object_id = df["object_id"].astype(str).iloc[0]  # what manifest.py writes out
     assert raw_by_id[manifest_object_id]["mention_summary"] == "from the int64 file"
+
+
+def _fake_repo(tmp_path, filenames):
+    return (
+        patch(
+            "huggingface_hub.list_repo_files",
+            return_value=[f"observations/spectra/{n}" for n in filenames],
+        ),
+        patch(
+            "huggingface_hub.hf_hub_download",
+            side_effect=lambda repo_id, filename, **k: str(tmp_path / Path(filename).name),
+        ),
+    )
+
+
+def _write_spectra_files(tmp_path):
+    pd.DataFrame({
+        "object_id": ["shared", "desi_only"],
+        "mention_summary": ["from desi", "desi exclusive"],
+        "_dist_arcsec": [0.1, 0.2],
+    }).to_parquet(tmp_path / "desi_crossmatch.parquet")
+
+    pd.DataFrame({
+        "object_id": ["shared", "subset_only"],
+        "mention_summary": ["from subset", "subset exclusive"],
+        "survey": ["DESI", "SDSS"],
+        "split": ["test", "train"],
+        "_dist_arcsec": [0.9, 0.3],
+    }).to_parquet(tmp_path / "desi_sdss_subset_crossmatch.parquet")
+
+
+def test_files_pin_reads_only_the_named_file(tmp_path):
+    _write_spectra_files(tmp_path)
+    listed, download = _fake_repo(
+        tmp_path, ["desi_crossmatch.parquet", "desi_sdss_subset_crossmatch.parquet"]
+    )
+    with listed, download:
+        df = load_spectra_table(
+            "UniverseTBD/AstroBridge-Data",
+            files=["observations/spectra/desi_sdss_subset_crossmatch.parquet"],
+        )
+
+    assert set(df["object_id"]) == {"shared", "subset_only"}
+    assert df.set_index("object_id").loc["shared", "mention_summary"] == "from subset"
+    assert set(df["split"]) == {"test", "train"}
+
+
+def test_upstream_split_survives_the_dedup_tie_break(tmp_path):
+    _write_spectra_files(tmp_path)
+    listed, download = _fake_repo(
+        tmp_path, ["desi_crossmatch.parquet", "desi_sdss_subset_crossmatch.parquet"]
+    )
+    with listed, download:
+        df = load_spectra_table("UniverseTBD/AstroBridge-Data")
+
+    by_id = df.set_index("object_id")
+    assert by_id.loc["shared", "mention_summary"] == "from desi"
+    assert by_id.loc["shared", "split"] == "test"
+    assert by_id.loc["subset_only", "split"] == "train"
+    assert pd.isna(by_id.loc["desi_only", "split"])

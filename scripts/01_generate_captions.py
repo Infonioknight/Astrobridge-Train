@@ -55,7 +55,11 @@ def main() -> None:
     manifest = pd.read_parquet(cfg.manifest.parquet)
 
     # AstroBridge-Data carries the literature-derived fields directly.
-    spectra_ds = load_spectra_table(cfg.sources.spectra.hf_path, revision=cfg.sources.spectra.get("revision"))
+    spectra_ds = load_spectra_table(
+        cfg.sources.spectra.hf_path,
+        revision=cfg.sources.spectra.get("revision"),
+        files=list(cfg.sources.spectra.get("files") or []) or None,
+    )
     text_by_object = spectra_ds.set_index("object_id")[
         ["mention_summary", "evidence_quotes", "arxiv_id"]
     ].to_dict(orient="index")

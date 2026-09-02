@@ -230,7 +230,11 @@ def main() -> None:
     if "spectra" in modality_names:
         from captioner.data.spectra_dataset import load_spectra_table
 
-        spectra_df = load_spectra_table(cfg.sources.spectra.hf_path, revision=cfg.sources.spectra.get("revision"))
+        spectra_df = load_spectra_table(
+            cfg.sources.spectra.hf_path,
+            revision=cfg.sources.spectra.get("revision"),
+            files=list(cfg.sources.spectra.get("files") or []) or None,
+        )
         spectra_by_id = spectra_df.set_index("object_id").to_dict(orient="index")
 
     transients_by_id = None

@@ -15,16 +15,25 @@ from captioner.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+MANIFEST_UPSTREAM_SPLIT_COLUMN = "split_upstream"
+
 
 def _load_spectra_table(cfg: DictConfig) -> pd.DataFrame:
     """Uses data/spectra_dataset.py, not `datasets.load_dataset` — the latter fails against the
     real repo's multiple, non-identically-schemaed parquet files (confirmed against a real run,
     see that module's docstring).
     """
-    from captioner.data.spectra_dataset import load_spectra_table
+    from captioner.data.spectra_dataset import UPSTREAM_SPLIT_COLUMN, load_spectra_table
 
-    df = load_spectra_table(cfg.sources.spectra.hf_path, revision=cfg.sources.spectra.get("revision"))
+    files = cfg.sources.spectra.get("files")
+    df = load_spectra_table(
+        cfg.sources.spectra.hf_path,
+        revision=cfg.sources.spectra.get("revision"),
+        files=list(files) if files else None,
+    )
     df = df.rename(columns={"ra_spectra": "ra", "dec_spectra": "dec"})
+    if UPSTREAM_SPLIT_COLUMN in df.columns:
+        df = df.rename(columns={UPSTREAM_SPLIT_COLUMN: MANIFEST_UPSTREAM_SPLIT_COLUMN})
     df["has_spectra"] = True
     return df
 
@@ -280,6 +289,22 @@ def _compute_stats(manifest: pd.DataFrame, join_method: str, cfg: DictConfig) ->
     return stats
 
 
+def _draw_per_tier(
+    manifest: pd.DataFrame, object_ids, frac_val: float, frac_test: float, rng
+) -> tuple[set, set]:
+    val: set = set()
+    test: set = set()
+    pool = manifest[manifest["object_id"].isin(set(object_ids))]
+    for _, group in pool.groupby("tier", sort=True):
+        ids = group["object_id"].to_numpy().copy()
+        rng.shuffle(ids)
+        n_val = int(round(len(ids) * float(frac_val)))
+        n_test = int(round(len(ids) * float(frac_test)))
+        val.update(ids[:n_val])
+        test.update(ids[n_val : n_val + n_test])
+    return val, test
+
+
 def assign_splits(manifest: pd.DataFrame, cfg: DictConfig) -> pd.DataFrame:
     """Object-level 80/10/10. Val/test are drawn from joint objects only *when there are enough
     of them* (>= sanity.min_joint_objects) — that's the spec's original intent, so joint-tier
@@ -321,15 +346,23 @@ def assign_splits(manifest: pd.DataFrame, cfg: DictConfig) -> pd.DataFrame:
     else:
         use_joint_only = len(joint_ids) >= min_joint and len(joint_ids) > 0
 
+    upstream = (
+        manifest[MANIFEST_UPSTREAM_SPLIT_COLUMN]
+        if bool(cfg.splits.get("honor_upstream", True))
+        and MANIFEST_UPSTREAM_SPLIT_COLUMN in manifest.columns
+        else None
+    )
+    n_unlabelled = len(manifest) if upstream is None else int(upstream.isna().sum())
+
     if use_joint_only:
-        if len(joint_ids) == 0:
+        if len(joint_ids) == 0 and upstream is None:
             raise ValueError(
                 "splits.policy='joint_only' but the manifest has no joint-tier objects, so val and "
                 "test would be empty — which makes evaluate_loss return a fake 0.0 every epoch and "
                 "silently truncates training via early stopping. Use 'stratified' until the joint "
                 "crossmatch produces real joint objects."
             )
-        eligible_by_tier = {"joint": joint_ids}
+        eligible_ids = set(joint_ids)
     else:
         if policy == "auto":
             logger.warning(
@@ -343,20 +376,38 @@ def assign_splits(manifest: pd.DataFrame, cfg: DictConfig) -> pd.DataFrame:
                 f"splits.policy='stratified': drawing val/test from all tiers, stratified "
                 f"({len(joint_ids)} joint objects present; threshold not consulted)."
             )
-        eligible_by_tier = {
-            tier: manifest.loc[manifest["tier"] == tier, "object_id"].to_numpy()
-            for tier in manifest["tier"].unique()
-        }
+        eligible_ids = set(manifest["object_id"])
 
     val_ids: set = set()
     test_ids: set = set()
-    for tier_ids in eligible_by_tier.values():
-        tier_ids = tier_ids.copy()
-        rng.shuffle(tier_ids)
-        n_val = int(round(len(tier_ids) * cfg.splits.val))
-        n_test = int(round(len(tier_ids) * cfg.splits.test))
-        val_ids.update(tier_ids[:n_val])
-        test_ids.update(tier_ids[n_val : n_val + n_test])
+
+    if upstream is None:
+        val_ids, test_ids = _draw_per_tier(
+            manifest, eligible_ids, cfg.splits.val, cfg.splits.test, rng
+        )
+    else:
+        test_ids |= set(manifest.loc[upstream == "test", "object_id"])
+
+        carved, _ = _draw_per_tier(
+            manifest, manifest.loc[upstream == "train", "object_id"], cfg.splits.val, 0.0, rng
+        )
+        val_ids |= carved
+
+        unlabelled = set(manifest.loc[upstream.isna(), "object_id"]) & eligible_ids
+        drawn_val, drawn_test = _draw_per_tier(
+            manifest, unlabelled, cfg.splits.val, cfg.splits.test, rng
+        )
+        val_ids |= drawn_val
+        test_ids |= drawn_test
+
+        n_labelled = int(upstream.notna().sum())
+        logger.info(
+            f"Honouring the source's own split labels for {n_labelled}/{len(manifest)} objects "
+            f"({int((upstream == 'test').sum())} test, {int((upstream == 'train').sum())} train); "
+            f"carved {len(carved)} val out of the upstream-train pool and drew "
+            f"{len(drawn_val)} val / {len(drawn_test)} test from the {n_unlabelled} objects with "
+            "no upstream label."
+        )
 
     manifest.loc[manifest["object_id"].isin(val_ids), "split"] = "val"
     manifest.loc[manifest["object_id"].isin(test_ids), "split"] = "test"
@@ -374,6 +425,18 @@ def write_manifest(cfg: DictConfig) -> None:
     split_hist = manifest["split"].value_counts().to_dict()
     stats["split_histogram"] = {k: int(v) for k, v in split_hist.items()}
 
+    n_upstream = (
+        int(manifest[MANIFEST_UPSTREAM_SPLIT_COLUMN].notna().sum())
+        if MANIFEST_UPSTREAM_SPLIT_COLUMN in manifest.columns
+        else 0
+    )
+    honored = bool(cfg.splits.get("honor_upstream", True)) and n_upstream > 0
+    stats["split_source"] = "upstream+seeded_draw" if honored else "seeded_draw"
+    stats["n_upstream_labelled_objects"] = n_upstream if honored else 0
+    if honored:
+        upstream_hist = manifest[MANIFEST_UPSTREAM_SPLIT_COLUMN].value_counts().to_dict()
+        stats["upstream_split_histogram"] = {str(k): int(v) for k, v in upstream_hist.items()}
+
     for subset_name, count in stats["tier_histogram"].items():
         if count < cfg.sanity.min_per_subset:
             logger.warning(
@@ -388,3 +451,4 @@ def write_manifest(cfg: DictConfig) -> None:
 
     logger.info(f"Wrote manifest with {len(manifest)} rows to {cfg.manifest.parquet}")
     logger.info(f"Tier histogram: {stats['tier_histogram']}")
+    logger.info(f"Split histogram: {stats['split_histogram']} (source: {stats['split_source']})")

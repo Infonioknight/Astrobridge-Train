@@ -117,23 +117,30 @@ def _attach_survey_column(df: pd.DataFrame, filename: str) -> pd.DataFrame:
 
 
 def load_spectra_table(
-    hf_path: str, revision: str | None = None, cache_dir: Path | None = None
+    hf_path: str,
+    revision: str | None = None,
+    cache_dir: Path | None = None,
+    files: list[str] | None = None,
 ) -> pd.DataFrame:
     from huggingface_hub import hf_hub_download, list_repo_files
 
-    files = [
-        f
-        for f in list_repo_files(hf_path, repo_type="dataset", revision=revision)
-        if f.startswith(SPECTRA_DIR_PREFIX) and f.endswith(".parquet")
-    ]
-    if not files:
-        raise FileNotFoundError(
-            f"No parquet files found under {SPECTRA_DIR_PREFIX!r} in {hf_path!r} — check the "
-            "repo layout hasn't changed."
-        )
+    if files is None:
+        selected = [
+            f
+            for f in list_repo_files(hf_path, repo_type="dataset", revision=revision)
+            if f.startswith(SPECTRA_DIR_PREFIX) and f.endswith(".parquet")
+        ]
+        if not selected:
+            raise FileNotFoundError(
+                f"No parquet files found under {SPECTRA_DIR_PREFIX!r} in {hf_path!r} — check the "
+                "repo layout hasn't changed."
+            )
+    else:
+        selected = [str(f) for f in files]
+        logger.info(f"Reading {len(selected)} pinned spectra file(s): {selected}")
 
     frames = []
-    for f in files:
+    for f in selected:
         local_path = hf_hub_download(
             repo_id=hf_path,
             filename=f,
@@ -144,7 +151,9 @@ def load_spectra_table(
         frames.append(_attach_survey_column(_read_parquet(local_path), Path(f).name))
 
     combined = pd.concat(frames, ignore_index=True, sort=False)
-    return _deduplicate_by_object_id(_canonicalize_object_ids(combined))
+    combined = _canonicalize_object_ids(combined)
+    combined = _propagate_upstream_split(combined)
+    return _deduplicate_by_object_id(combined)
 
 
 _BYTES_REPR_RE = re.compile(r"""b(['"])(?P<value>.*)\1""", re.DOTALL)
@@ -209,6 +218,27 @@ def _canonicalize_object_ids(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+UPSTREAM_SPLIT_COLUMN = "split"
+
+
+def _propagate_upstream_split(df: pd.DataFrame) -> pd.DataFrame:
+    if UPSTREAM_SPLIT_COLUMN not in df.columns:
+        return df
+
+    df = df.copy()
+    resolved = df[UPSTREAM_SPLIT_COLUMN].groupby(df["object_id"]).first()
+    filled = df["object_id"].map(resolved)
+    n_recovered = int(filled.notna().sum() - df[UPSTREAM_SPLIT_COLUMN].notna().sum())
+    df[UPSTREAM_SPLIT_COLUMN] = filled
+
+    logger.info(
+        f"Upstream {UPSTREAM_SPLIT_COLUMN!r} labels: {int(filled.notna().sum())}/{len(df)} rows "
+        f"covering {int(resolved.notna().sum())}/{resolved.size} objects "
+        f"({n_recovered} rows filled in from another file's row for the same object)."
+    )
+    return df
+
+
 def _deduplicate_by_object_id(df: pd.DataFrame) -> pd.DataFrame:
     n_dupe_rows = int(df["object_id"].duplicated(keep=False).sum())
     if n_dupe_rows == 0:
@@ -226,9 +256,10 @@ def _deduplicate_by_object_id(df: pd.DataFrame) -> pd.DataFrame:
 
     deduped = df.drop_duplicates(subset="object_id", keep="first").reset_index(drop=True)
     logger.warning(
-        f"{n_dupe_rows} rows across {n_dupe_objects} object_ids appeared in more than one "
-        f"source parquet file (e.g. a target with both DESI and SDSS spectra, or a '_subset' "
-        f"file overlapping its non-subset counterpart) — kept one row per object_id, tie-broken "
+        f"{n_dupe_rows} rows across {n_dupe_objects} object_ids are not one-row-per-object — a "
+        f"target with more than one spectrum (DESI and SDSS both observed it), and, when more "
+        f"than one file is read, the same target repeated across files — kept one row per "
+        f"object_id, tie-broken "
         f"by {tie_break}. This affects which mention_summary/spectrum version each duplicated "
         f"object ends up with; worth spot-checking a few of them if caption quality looks off "
         f"for objects that had duplicates."
