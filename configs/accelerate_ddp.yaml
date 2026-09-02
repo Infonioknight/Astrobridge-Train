@@ -16,7 +16,7 @@ machine_rank: 0
 main_training_function: main
 mixed_precision: bf16
 num_machines: 1          # single node only — multi-node is out of scope for this build (§0)
-num_processes: 1         # <-- set this to your GPU count
+num_processes: 4         # <-- set this to your GPU count
 rdzv_backend: static
 same_network: true
 tpu_env: []
