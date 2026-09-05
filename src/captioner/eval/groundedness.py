@@ -37,9 +37,12 @@ def _generate_caption(model: Captioner, tokenizer, batch: dict, device: str, max
     There's no Accelerator here, so without this same autocast, torch.cat([prefix, prompt_embeds])
     upcast-promotes to fp32 and generate() then feeds fp32 activations into the LLM's bf16
     weights — confirmed real: "RuntimeError: expected mat1 and mat2 to have the same dtype, but
-    got: float != c10::BFloat16" inside Qwen3.5's linear_attn layer. Reproducing the exact same
-    autocast context training used (rather than manually casting weights at one specific layer)
-    is what actually fixes every boundary, not just the one that happened to error first.
+    got: float != c10::BFloat16" inside Qwen3.5's linear_attn layer (the LLM in use when this bug
+    was first found and fixed; the same fp32-fusion-stack-vs-bf16-LLM mismatch applies to any
+    bf16 LLM this project swaps in, google/gemma-4-12B-it included — it isn't Qwen-specific).
+    Reproducing the exact same autocast context training used (rather than manually casting
+    weights at one specific layer) is what actually fixes every boundary, not just the one that
+    happened to error first.
     """
     model.eval()
     fusion_stack = model.fusion_stack

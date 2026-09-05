@@ -21,11 +21,8 @@ instruction-following is what's being relied on here, not something LoRA/the fus
 specifically trained to do (they only ever saw one fixed captioning instruction during
 training) — see inference.py's generate_caption docstring.
 
-For a side-by-side comparison against plain out-of-the-box Qwen instead of just this pipeline's
-own answer, see inference/compare.py.
-
 Usage:
-    python inference/local.py --checkpoint-dir outputs/checkpoints/stage2/best \\
+    python scripts/07_infer.py --checkpoint-dir outputs/checkpoints/stage2/best \\
         --lora-dir outputs/checkpoints/stage2/best/lora --image-npy my_cutout.npy \\
         --question "What kind of object is this and why do you think so?"
 """

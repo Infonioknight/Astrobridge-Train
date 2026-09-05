@@ -59,10 +59,14 @@ def run_stage2(cfg: DictConfig) -> None:
         raise RuntimeError(
             f"target_modules={list(cfg.lora.target_modules)} matched zero LoRA-wrapped parameters "
             f"on {cfg.llm.name} — PEFT applies LoRA silently to whatever matches, so a wrong name "
-            "here would otherwise train nothing on the LLM side without any error. Qwen3.5's "
-            "Gated DeltaNet layers may not use the standard q_proj/k_proj/v_proj/o_proj naming — "
-            "inspect `[n for n, _ in llm.named_modules()]` on the base model and update "
-            "configs/stage2.yaml's lora.target_modules to match."
+            "here would otherwise train nothing on the LLM side without any error. Some "
+            "architectures (e.g. Qwen3.5's Gated DeltaNet layers) don't use the standard "
+            "q_proj/k_proj/v_proj/o_proj naming for every layer — inspect "
+            "`[n for n, _ in llm.named_modules()]` on the base model and update "
+            "configs/stage2.yaml's lora.target_modules to match. (Confirmed real for "
+            "google/gemma-4-12B-it: its attention/MLP layers do use these standard names, so "
+            "this error shouldn't trigger for the current LLM — if it does, something else "
+            "changed.)"
         )
     logger.info(f"LoRA applied to {n_lora_params:,} parameters across the LLM")
 

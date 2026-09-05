@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Publishes a trained checkpoint to a private HF Hub model repo, so the team can pull it the
-same way this pipeline already pulls everything else (AION, Qwen, AstroBridge-Data) — via
-huggingface_hub, no separate storage account needed.
+same way this pipeline already pulls everything else (AION, the LLM backbone, AstroBridge-Data)
+— via huggingface_hub, no separate storage account needed.
 
 Publishes to `repo_id`:
   - adapter_config.json + adapter_model.safetensors — PEFT's own save_pretrained format for the
@@ -14,8 +14,9 @@ Publishes to `repo_id`:
   - README.md — model card with the base model, training config hash/quantization/git sha, and
     the groundedness eval report if one exists at outputs/eval/groundedness_report.json.
 
-Does NOT publish the base Qwen3.5-9B weights — those are frozen/untouched and stay sourced from
-the original `Qwen/Qwen3.5-9B` repo.
+Does NOT publish the base LLM's own weights (currently google/gemma-4-12B-it) — those are
+frozen/untouched and stay sourced from the original repo, whatever configs/model.yaml's
+`llm.name` was at training time.
 
 Usage:
     python scripts/06_publish_model.py --checkpoint-dir outputs/checkpoints/stage2/best \\

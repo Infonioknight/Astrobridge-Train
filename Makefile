@@ -41,7 +41,7 @@ publish:
 infer:
 	@test -n "$(CKPT)" || (echo "Usage: make infer CKPT=outputs/checkpoints/stage2/best QUESTION='What kind of object is this?' [LORA=...] [IMAGE=cutout.npy] [SPECTRUM=spectrum.npz] [SURVEY=desi] [LIGHTCURVE=lc.npz]" && exit 1)
 	@test -n "$(QUESTION)" || (echo "Usage: make infer CKPT=outputs/checkpoints/stage2/best QUESTION='What kind of object is this?' [LORA=...] [IMAGE=cutout.npy] [SPECTRUM=spectrum.npz] [SURVEY=desi] [LIGHTCURVE=lc.npz]" && exit 1)
-	python inference/local.py --checkpoint-dir $(CKPT) --question "$(QUESTION)" \
+	python scripts/07_infer.py --checkpoint-dir $(CKPT) --question "$(QUESTION)" \
 		$(if $(LORA),--lora-dir $(LORA)) \
 		$(if $(IMAGE),--image-npy $(IMAGE)) \
 		$(if $(SPECTRUM),--spectrum-npz $(SPECTRUM)) \

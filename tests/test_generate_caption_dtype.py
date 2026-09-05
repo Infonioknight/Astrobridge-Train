@@ -10,11 +10,39 @@ _generate_caption docstring for the full reasoning.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
+import torch.nn as nn
 
 from captioner.eval.groundedness import _generate_caption
 from captioner.model.captioner import Captioner, FusionStack
-from tests.conftest import FakeBF16LLM, FakeTokenizer
+
+
+class _FakeBF16LLM(nn.Module):
+    """Mimics the real LLM being persistently stored in bf16 — not just "under autocast"."""
+
+    def __init__(self, vocab_size: int = 32, d_model: int = 16):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model).to(torch.bfloat16)
+        self.proj = nn.Linear(d_model, vocab_size).to(torch.bfloat16)
+        self.config = SimpleNamespace(hidden_size=d_model)
+
+    def get_input_embeddings(self):
+        return self.embed
+
+    def generate(self, inputs_embeds, attention_mask, max_new_tokens, do_sample):
+        # This is exactly the operation that raised the real error: a bf16-weight Linear layer
+        # fed an fp32 `inputs_embeds` — without the caller reconciling dtypes first (autocast),
+        # this raises RuntimeError: "mat1 and mat2 must have the same dtype".
+        self.proj(inputs_embeds)
+        B = inputs_embeds.shape[0]
+        return torch.zeros(B, max_new_tokens, dtype=torch.long)
+
+
+class _FakeTokenizer:
+    def batch_decode(self, ids, skip_special_tokens=True):
+        return ["a caption"] * ids.shape[0]
 
 
 def _make_model():
@@ -26,7 +54,7 @@ def _make_model():
         projector_hidden_mult=2,
         projector_dropout=0.0,
     )  # fp32 by default — deliberately NOT cast to bf16, matching real 04_eval.py behavior
-    return Captioner(fusion_stack, FakeBF16LLM(), n_queries=2)
+    return Captioner(fusion_stack, _FakeBF16LLM(), n_queries=2)
 
 
 def _make_batch():
@@ -40,8 +68,8 @@ def _make_batch():
 
 def test_generate_caption_survives_fp32_fusion_vs_bf16_llm_mismatch():
     model = _make_model()
-    out = _generate_caption(model, FakeTokenizer(), _make_batch(), device="cpu", max_new_tokens=3)
-    assert out == ["n=1"]  # FakeTokenizer.batch_decode's real return shape — see conftest.py
+    out = _generate_caption(model, _FakeTokenizer(), _make_batch(), device="cpu", max_new_tokens=3)
+    assert out == ["a caption"]
 
 
 def test_reproduces_the_real_crash_without_autocast():

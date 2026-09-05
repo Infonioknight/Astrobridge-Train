@@ -80,13 +80,16 @@ def build_llm(model_cfg: DictConfig, device=None):
     try:
         llm = AutoModelForCausalLM.from_pretrained(model_cfg.llm.name, **load_kwargs)
     except (ValueError, KeyError) as e:
-        # Qwen3.5-9B's real config (confirmed via a live check) carries a `vision_config` —
-        # architecture "Qwen3_5ForConditionalGeneration" is a native vision-language model, not
-        # a plain causal LM, so AutoModelForCausalLM may not have it registered even once
-        # transformers recognizes the "qwen3_5" model_type at all. This build never uses Qwen's
-        # own vision pathway (LegacySurveyImage/DESISpectrum go through AION, not here) — a
-        # generic AutoModel load still exposes .get_input_embeddings() and forward(inputs_embeds=
-        # ...), which is all Captioner.forward actually needs.
+        # This except branch was written for Qwen3.5-9B, whose native vision-language class
+        # (Qwen3_5ForConditionalGeneration) wasn't always registered under AutoModelForCausalLM.
+        # google/gemma-4-12B-it doesn't hit this: confirmed live that its model_type
+        # ("gemma4_unified") maps to Gemma4UnifiedForConditionalGeneration under
+        # AutoModelForCausalLM directly, so the try above succeeds and this fallback never runs
+        # for the current LLM. Left in place as a defensive catch-all for whichever LLM comes
+        # next — a generic AutoModel load still exposes .get_input_embeddings() and
+        # forward(inputs_embeds=...), which is all Captioner.forward actually needs. This build
+        # never uses any native vision pathway the configured LLM might have (LegacySurveyImage/
+        # DESISpectrum go through AION, not here).
         logger.warning(
             f"AutoModelForCausalLM.from_pretrained({model_cfg.llm.name!r}) failed "
             f"({type(e).__name__}: {e}); retrying with AutoModel (this architecture may be "
@@ -110,7 +113,10 @@ def build_llm(model_cfg: DictConfig, device=None):
 def build_llm_staggered(model_cfg: DictConfig, accelerator):
     """Loads the LLM one rank at a time, each placing it on its own GPU before the next starts.
 
-    Measured directly on this build (Qwen3.5-9B bf16, 8.95B params, GH200): `from_pretrained`
+    Measured directly on this build (Qwen3.5-9B bf16, 8.95B params, GH200) — NOT re-measured for
+    google/gemma-4-12B-it (~12B params, ~34% more weight than Qwen3.5-9B, so the transient below
+    will genuinely be larger, roughly proportionally, but this hasn't been confirmed by a real
+    measurement against the new model yet): `from_pretrained`
     itself is nearly free in host RAM — the weights come back mmap-backed, ~0.35 GiB resident.
     Moving them to the GPU is what costs: RssAnon peaks at **14.66 GiB** during the transfer and
     falls back to ~0.38 GiB once it completes, because the CPU-side weights stay alive until the
@@ -145,8 +151,10 @@ def build_llm_staggered(model_cfg: DictConfig, accelerator):
 
 
 def get_llm_hidden_size(llm) -> int:
-    """`Qwen3_5ForConditionalGeneration`-style architectures often nest text config under
-    `config.text_config` rather than exposing `hidden_size` flatly — check both rather than
+    """Native vision-language architectures — `Qwen3_5ForConditionalGeneration` previously,
+    `Gemma4UnifiedForConditionalGeneration` now (confirmed real: google/gemma-4-12B-it's
+    hidden_size is 3840, nested under `config.text_config`, not flat) — often nest text config
+    under `config.text_config` rather than exposing `hidden_size` flatly. Check both rather than
     assume, so a config layout change fails loudly instead of picking up the wrong `d_llm`.
     """
     if hasattr(llm.config, "hidden_size"):

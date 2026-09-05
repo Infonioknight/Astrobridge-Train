@@ -9,11 +9,13 @@ lora:
   r: 16
   alpha: 32
   dropout: 0.05
-  # These are standard Llama-family names. Qwen3.5 (Qwen3_5ForConditionalGeneration) mixes in
-  # Gated DeltaNet layers, which may use different projection names for at least some layers —
-  # confirm against `[n for n, _ in llm.named_modules()]` on the loaded base model before
-  # trusting this list. train/stage2.py raises loudly at startup if this ends up matching zero
-  # parameters, rather than silently training nothing on the LLM side.
+  # These are standard Llama-family names. Confirmed real for google/gemma-4-12B-it
+  # (Gemma4UnifiedForConditionalGeneration) directly against its modeling source — its
+  # attention/MLP layers use exactly these projection names, so this list carries over unchanged
+  # from the earlier Qwen3.5-9B setup. Still worth reconfirming against
+  # `[n for n, _ in llm.named_modules()]` on the loaded base model if the LLM changes again —
+  # train/stage2.py raises loudly at startup if this ends up matching zero parameters, rather
+  # than silently training nothing on the LLM side.
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 
 batch_size: 32

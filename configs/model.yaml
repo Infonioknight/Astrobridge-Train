@@ -34,19 +34,32 @@ projector:
   dropout: 0.1
 
 llm:
-  name: Qwen/Qwen3.5-9B
+  name: google/gemma-4-12B-it
+  # Deliberately the instruction-tuned checkpoint, not the plain `google/gemma-4-12B` base —
+  # confirmed real, not a default: the base checkpoint ships no chat template at all (no
+  # `chat_template.jinja`, no `chat_template` key in tokenizer_config.json), so it can't answer
+  # "describe this image" coherently out of the box, which would make the post-training
+  # base-vs-equipped comparison (inference/compare.py) meaningless. `-it` is architecturally
+  # identical to the base model (same Gemma4UnifiedForConditionalGeneration class, same
+  # hidden_size/layers/vocab — confirmed against both configs directly), so this is a pure
+  # weight-source swap, and training itself never touches the chat template anyway (generate_
+  # caption tokenizes the prompt as plain text, not via apply_chat_template) — using `-it` for
+  # both training and the comparison baseline just means both sides start from the exact same
+  # weights, isolating what this project's own architecture adds.
   dtype: bfloat16
-  # Qwen3.5's architecture (Qwen3_5ForConditionalGeneration) mixes Gated DeltaNet layers with
-  # regular attention — not a plain Llama-style transformer. `sdpa` is the safe default; try
-  # flash_attention_2 explicitly once you've confirmed the installed `transformers`/model code
-  # actually supports it for every layer type here (it may silently only help the non-DeltaNet
-  # layers, or error — verify before relying on it for speed).
+  # Gemma4UnifiedForConditionalGeneration mixes sliding-window and full-attention layers (a
+  # repeating pattern, not a plain Llama-style transformer) but is a standard, natively-supported
+  # architecture as of transformers>=5.10 (unlike Qwen3.5's hybrid DeltaNet layers, which needed
+  # trust_remote_code). `sdpa` is the safe default; try flash_attention_2 once you've confirmed
+  # the installed transformers version actually supports it for every layer type here.
   attn_impl: sdpa
-  trust_remote_code: true   # new/hybrid architecture — confirm you can drop this once your
-                             # installed `transformers` version has native "qwen3_5" support
-  quantization: null        # null = bf16 (~18GB weights for 9B — fits a single DDP replica on
-                             # most modern GPUs). "nf4" = QLoRA fallback if your GPUs are smaller
-                             # than that. MUST be identical in stage1 and stage2 — see §10.
+  trust_remote_code: false   # confirmed live: AutoConfig.from_pretrained(..., trust_remote_code=
+                              # False) resolves natively (Gemma4UnifiedConfig) against transformers
+                              # 5.16.1 — no remote code needed, unlike Qwen3.5's hybrid arch.
+  quantization: null        # null = bf16 (~24GB weights for 12B, vs. ~18GB for Qwen3.5-9B —
+                             # confirm your training GPU(s) still fit this before switching).
+                             # "nf4" = QLoRA fallback if your GPUs are smaller than that. MUST be
+                             # identical in stage1 and stage2 — see §10.
 
 prompt:
   # Text prompt template embedded ahead of the caption target. {modalities} is filled with

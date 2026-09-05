@@ -1,15 +1,43 @@
 """generate_caption's assembly logic (mask construction, prompt formatting, autocast reconciling
 fp32 fusion stack vs bf16 LLM) — tested with fake encoders/tokenizer/LLM so it runs on CPU with
-no real weights, network, or AION package. Shares its LLM/tokenizer fakes with
-test_generate_caption_dtype.py via conftest.py — both exercise the same real dtype concern.
+no real weights, network, or AION package. Mirrors test_generate_caption_dtype.py's fixtures.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
+import torch.nn as nn
 
 from captioner.inference import generate_caption
 from captioner.model.captioner import Captioner, FusionStack
-from tests.conftest import FakeBF16LLM, FakeTokenizer
+
+
+class _FakeBF16LLM(nn.Module):
+    def __init__(self, vocab_size: int = 32, d_model: int = 16):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model).to(torch.bfloat16)
+        self.proj = nn.Linear(d_model, vocab_size).to(torch.bfloat16)
+        self.config = SimpleNamespace(hidden_size=d_model)
+
+    def get_input_embeddings(self):
+        return self.embed
+
+    def generate(self, inputs_embeds, attention_mask, max_new_tokens, do_sample):
+        self.proj(inputs_embeds)  # dtype-sensitive, exercises the same real crash if unreconciled
+        return torch.zeros(inputs_embeds.shape[0], max_new_tokens, dtype=torch.long)
+
+
+class _FakeTokenizer:
+    def __init__(self):
+        self.seen_prompts: list[str] = []
+
+    def __call__(self, text, add_special_tokens=False, return_tensors="pt"):
+        self.seen_prompts.append(text)
+        return {"input_ids": torch.randint(0, 32, (1, 4))}
+
+    def batch_decode(self, ids, skip_special_tokens=True):
+        return [f"n={ids.shape[0]}"] * ids.shape[0]
 
 
 class _FakeEncoder:
@@ -36,7 +64,7 @@ def _make_model_and_encoders():
         projector_hidden_mult=2,
         projector_dropout=0.0,
     )
-    model = Captioner(fusion_stack, FakeBF16LLM(), n_queries=2)
+    model = Captioner(fusion_stack, _FakeBF16LLM(), n_queries=2)
     encoders = {"image": _FakeEncoder(3, 4), "spectra": _FakeEncoder(3, 4)}
     return model, encoders, out_dims, max_tokens
 
@@ -44,7 +72,7 @@ def _make_model_and_encoders():
 def test_single_modality_generates_a_caption():
     model, encoders, out_dims, max_tokens = _make_model_and_encoders()
     caption = generate_caption(
-        model, FakeTokenizer(), encoders, out_dims, max_tokens,
+        model, _FakeTokenizer(), encoders, out_dims, max_tokens,
         "Describe using only {modalities}.", "cpu",
         raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
         max_new_tokens=3,
@@ -55,7 +83,7 @@ def test_single_modality_generates_a_caption():
 def test_both_modalities_generates_a_caption():
     model, encoders, out_dims, max_tokens = _make_model_and_encoders()
     caption = generate_caption(
-        model, FakeTokenizer(), encoders, out_dims, max_tokens,
+        model, _FakeTokenizer(), encoders, out_dims, max_tokens,
         "Describe using only {modalities}.", "cpu",
         raw_inputs={
             "image": {"pixel_values": torch.zeros(1, 1, 4, 4)},
@@ -70,7 +98,7 @@ def test_empty_raw_inputs_raises():
     model, encoders, out_dims, max_tokens = _make_model_and_encoders()
     try:
         generate_caption(
-            model, FakeTokenizer(), encoders, out_dims, max_tokens,
+            model, _FakeTokenizer(), encoders, out_dims, max_tokens,
             "Describe using only {modalities}.", "cpu", raw_inputs={},
         )
         assert False, "expected ValueError"
@@ -80,7 +108,7 @@ def test_empty_raw_inputs_raises():
 
 def test_question_overrides_the_template_prompt_verbatim():
     model, encoders, out_dims, max_tokens = _make_model_and_encoders()
-    tokenizer = FakeTokenizer()
+    tokenizer = _FakeTokenizer()
 
     generate_caption(
         model, tokenizer, encoders, out_dims, max_tokens,
@@ -94,7 +122,7 @@ def test_question_overrides_the_template_prompt_verbatim():
 
 def test_no_question_falls_back_to_template():
     model, encoders, out_dims, max_tokens = _make_model_and_encoders()
-    tokenizer = FakeTokenizer()
+    tokenizer = _FakeTokenizer()
 
     generate_caption(
         model, tokenizer, encoders, out_dims, max_tokens,
@@ -124,7 +152,7 @@ def test_fewer_raw_tokens_than_max_tokens_are_padded_and_masked():
     model.fusion_stack.forward = _spy
 
     generate_caption(
-        model, FakeTokenizer(), encoders, out_dims, max_tokens,
+        model, _FakeTokenizer(), encoders, out_dims, max_tokens,
         "Describe using only {modalities}.", "cpu",
         raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
         max_new_tokens=3,
@@ -150,7 +178,7 @@ def test_more_raw_tokens_than_max_tokens_are_truncated():
     model.fusion_stack.forward = _spy
 
     generate_caption(
-        model, FakeTokenizer(), encoders, out_dims, max_tokens,
+        model, _FakeTokenizer(), encoders, out_dims, max_tokens,
         "Describe using only {modalities}.", "cpu",
         raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
         max_new_tokens=3,
@@ -177,7 +205,7 @@ def test_absent_modality_gets_true_mask_not_zero_content_only():
     model.fusion_stack.forward = _spy
 
     generate_caption(
-        model, FakeTokenizer(), encoders, out_dims, max_tokens,
+        model, _FakeTokenizer(), encoders, out_dims, max_tokens,
         "Describe using only {modalities}.", "cpu",
         raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
         max_new_tokens=3,
