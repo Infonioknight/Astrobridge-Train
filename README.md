@@ -79,7 +79,7 @@ files directly.
 ## Trying it out on a new object
 
 ```bash
-python scripts/07_infer.py --checkpoint-dir outputs/checkpoints/stage2/best \
+python inference/local.py --checkpoint-dir outputs/checkpoints/stage2/best \
     --lora-dir outputs/checkpoints/stage2/best/lora \
     --image-npy path/to/cutout.npy --question "What kind of object is this?"
 ```
@@ -88,8 +88,10 @@ Swap `--image-npy` for `--spectrum-npz ... --spectrum-survey desi` or `--lightcu
 pass several at once to condition the answer on more than one modality.
 
 Runs the encoders live on a brand-new object (not part of the manifest/cache) and asks the model
-your own free-form question — see `scripts/07_infer.py`'s docstring for the exact input format,
+your own free-form question — see `inference/local.py`'s docstring for the exact input format,
 and `test_subjects/` for 5 image, 5 spectrum and 5 light-curve examples to try it on immediately.
+For running on a rented Modal GPU instead of a local one, or a side-by-side comparison against
+plain out-of-the-box Qwen, see `inference/README.md`.
 
 ## Multiple GPUs on one machine?
 
