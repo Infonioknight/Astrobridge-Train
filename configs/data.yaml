@@ -8,7 +8,11 @@ sources:
     revision: null   # not loaded via `datasets.load_dataset` — see data/spectra_dataset.py.
                       # No `split` here: the repo's multiple parquet files are read directly.
     files:
-      - observations/spectra/desi_sdss_subset_crossmatch_nolan_1.0arcsec.parquet
+      # Switched from the "subset" (mention-level, 5,066 rows / 2,178 objects, many duplicate
+      # rows per object from multiple literature mentions) to this one deliberately — confirmed
+      # directly against the real file: 2,047 rows / 2,046 unique objects (one row per object,
+      # not per mention), clean upstream `split` column (1,647 train / 400 test, 0 missing).
+      - observations/spectra/desi_sdss_crossmatch_nolan_1.0arcsec.parquet
   image:
     hf_path: gapatron/legacy_survey_south_images_captions
     revision: null   # not a `datasets.load_dataset`-shaped repo — see data/image_dataset.py.
