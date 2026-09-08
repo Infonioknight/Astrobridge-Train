@@ -151,13 +151,10 @@ def free_local_backend(backend: EvalBackend) -> None:
 # `/root/captioner/...`, skipping the local `src/` layer, and `utils/config.py`'s `CONFIG_DIR`
 # path-climbing lands on exactly `/configs` from that remote layout).
 #
-# **Not yet live-verified** (per this branch's plan): whether `modal deploy eval/backend.py`
-# cleanly targets a library file (this one) rather than a script meant as the sole entrypoint.
-# Spike this once — `modal deploy eval/backend.py` then, from a throwaway script,
-# `modal.Function.from_name("astrobridge-eval-backend", "_equipped_infer").remote(...)` — before
-# trusting `_modal_backend` below end-to-end. If it doesn't round-trip cleanly, the fallback is a
-# thin `eval/modal_entrypoint.py` that does `from eval.backend import modal_app` plus an
-# `@modal_app.local_entrypoint()` wrapper — still zero duplicated MODEL_REPO_ID/image/app.
+# `modal deploy`/`modal run` look for a variable literally named `app` by default (confirmed
+# live: naming it `modal_app` fails deploy with "module 'backend' has no attribute 'app'") — so
+# the actual `modal.App` instance below is named `app`, not `modal_app`, despite this section's
+# comments still saying "modal_app" in prose for clarity against `inference/modal_app.py`'s name.
 
 import modal  # noqa: E402  (kept below the docstring/local-backend code on purpose — this is the
                 # one place Modal-specific imports belong; nothing above this line touches modal)
@@ -169,7 +166,7 @@ modal_image = (
     .add_local_dir("configs", remote_path="/configs")
 )
 
-modal_app = modal.App("astrobridge-eval-backend")
+app = modal.App("astrobridge-eval-backend")
 
 hf_cache_volume = modal.Volume.from_name("astrobridge-hf-cache", create_if_missing=True)
 
@@ -180,7 +177,7 @@ hf_cache_volume = modal.Volume.from_name("astrobridge-hf-cache", create_if_missi
 DEFAULT_MODEL_REPO_ID = "UniverseTBD/astrobridge-model-v3_qwen"
 
 
-@modal_app.function(
+@app.function(
     gpu="L4",
     cpu=2.0,
     memory=16384,
@@ -222,7 +219,7 @@ def _equipped_infer(
     )
 
 
-@modal_app.function(
+@app.function(
     gpu="L4",
     cpu=2.0,
     memory=16384,
