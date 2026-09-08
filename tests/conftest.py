@@ -98,3 +98,45 @@ def make_modality_batch(B: int, out_dims: dict[str, int], T_max: dict[str, int],
                     mask[i] = True
         batch[name] = {"tokens": tokens, "mask": mask}
     return batch
+
+
+class FakeBF16LLM(nn.Module):
+    """Mimics the real LLM being persistently stored in bf16 — not just "under autocast". Shared
+    by test_inference.py and test_generate_caption_dtype.py, which both exercise the same real
+    fp32-fusion-stack-vs-bf16-LLM dtype reconciliation, just against two different real functions
+    (captioner.inference.generate_caption and eval/groundedness.py's _generate_caption).
+    """
+
+    def __init__(self, vocab_size: int = 32, d_model: int = 16):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model).to(torch.bfloat16)
+        self.proj = nn.Linear(d_model, vocab_size).to(torch.bfloat16)
+        self.config = SimpleNamespace(hidden_size=d_model)
+
+    def get_input_embeddings(self):
+        return self.embed
+
+    def generate(self, inputs_embeds, attention_mask, max_new_tokens, do_sample):
+        # This is exactly the operation that raised the real error: a bf16-weight Linear layer
+        # fed an fp32 `inputs_embeds` — without the caller reconciling dtypes first (autocast),
+        # this raises RuntimeError: "mat1 and mat2 must have the same dtype".
+        self.proj(inputs_embeds)
+        B = inputs_embeds.shape[0]
+        return torch.zeros(B, max_new_tokens, dtype=torch.long)
+
+
+class FakeTokenizer:
+    """Superset of what either caller needs: generate_caption calls the tokenizer directly
+    (__call__) to build prompt_ids, while _generate_caption receives already-tokenized batches
+    and only ever calls batch_decode — both are covered here either way.
+    """
+
+    def __init__(self):
+        self.seen_prompts: list[str] = []
+
+    def __call__(self, text, add_special_tokens=False, return_tensors="pt"):
+        self.seen_prompts.append(text)
+        return {"input_ids": torch.randint(0, 32, (1, 4))}
+
+    def batch_decode(self, ids, skip_special_tokens=True):
+        return [f"n={ids.shape[0]}"] * ids.shape[0]

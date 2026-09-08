@@ -3,7 +3,7 @@
 # Override on the command line, e.g.: make stage1 ACCELERATE_CONFIG=configs/my_cluster.yaml
 ACCELERATE_CONFIG ?= configs/accelerate_ddp.yaml
 
-.PHONY: test manifest captions cache stage1 eval stage2 install check-access publish infer
+.PHONY: test manifest captions cache stage1 eval stage2 install check-access publish infer eval-lightcurve eval-image
 
 install:
 	uv pip install -e ".[dev]"
@@ -47,3 +47,17 @@ infer:
 		$(if $(SPECTRUM),--spectrum-npz $(SPECTRUM)) \
 		$(if $(SURVEY),--spectrum-survey $(SURVEY)) \
 		$(if $(LIGHTCURVE),--lightcurve-npz $(LIGHTCURVE))
+
+# See eval/README.md — TRACK/BACKEND/LIMIT are optional, defaulting per eval/runners/*.py's own
+# argparse defaults (lightcurve_only / base_only, local, no limit).
+eval-lightcurve:
+	uv run python -m eval.runners.run_lightcurve_eval \
+		$(if $(TRACK),--track $(TRACK)) \
+		$(if $(BACKEND),--backend $(BACKEND)) \
+		$(if $(LIMIT),--limit $(LIMIT))
+
+eval-image:
+	uv run python -m eval.runners.run_image_eval \
+		$(if $(TRACK),--track $(TRACK)) \
+		$(if $(BACKEND),--backend $(BACKEND)) \
+		$(if $(LIMIT),--limit $(LIMIT))
