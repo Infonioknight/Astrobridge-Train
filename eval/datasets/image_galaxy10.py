@@ -91,11 +91,14 @@ def _download_and_read(hf_path: str, columns: list[str], cache_dir: Path | None 
 
 
 def load_galaxy10_rgb_only(hf_path: str = GALAXY10_HF_PATH, cache_dir: Path | None = None) -> pd.DataFrame:
-    """One row per test-set object: `label`, `label_name`, and the pre-rendered `image_rgb`
-    struct (`{bytes, path}` — decode with `decode_rgb_image` below). Feeds the base-model
-    comparison side only; never touches `image_bands`/AION.
+    """One row per test-set object: `label`, `label_name`, `ra`/`dec` (needed later for
+    `eval.datasets.gz_decals_votes`'s crossmatch — not used by the base-model side itself), and
+    the pre-rendered `image_rgb` struct (`{bytes, path}` — decode with `decode_rgb_image` below).
+    Feeds the base-model comparison side only; never touches `image_bands`/AION.
     """
-    return _download_and_read(hf_path, ["Galaxy10_DECals_index", "image_rgb", "label", "label_name"], cache_dir)
+    return _download_and_read(
+        hf_path, ["Galaxy10_DECals_index", "ra", "dec", "image_rgb", "label", "label_name"], cache_dir,
+    )
 
 
 def decode_rgb_image(image_rgb_struct: dict) -> Image.Image:
@@ -112,6 +115,83 @@ def load_galaxy10_aion_bands(hf_path: str = GALAXY10_HF_PATH, cache_dir: Path | 
     verified" hypothesis stays isolated to one function).
     """
     return _download_and_read(hf_path, ["Galaxy10_DECals_index", "image_bands", "label", "label_name"], cache_dir)
+
+
+def stratified_sample(
+    table: pd.DataFrame, n_total: int, seed: int, min_per_class: int = 2, label_col: str = "label_name",
+) -> pd.DataFrame:
+    """Deterministic, seeded sample covering all 10 classes — every random decision here is
+    driven by exactly one `numpy.random.default_rng(seed)` instance, consumed in a fixed order
+    (`GALAXY10_LABELS`, never dict/groupby iteration order, which isn't guaranteed stable across
+    pandas versions), so the same `seed` always draws the same objects.
+
+    Per-class target counts use the "largest remainder" apportionment method (a standard,
+    well-known deterministic algorithm — the same one used for allocating parliamentary seats
+    proportionally, not something invented for this): allocate each class
+    `floor(n_total * class_size / total_size)`, raised to `min_per_class` (capped at how many
+    that class actually has — `Cigar Shaped Smooth Galaxies` only has 8 in the full test set, so
+    `min_per_class` beyond that is silently capped, not padded with duplicates), then hand out
+    the remaining slots one at a time to the classes with the largest fractional remainder,
+    skipping any class already at its cap. This guarantees every one of the 10 classes appears
+    (as long as `min_per_class >= 1`) and the total sampled is exactly `n_total` (or less, only
+    if `n_total` exceeds the full table size).
+    """
+    rng = np.random.default_rng(seed)
+    groups = {label: table.index[table[label_col] == label].to_numpy() for label in GALAXY10_LABELS}
+    sizes = {label: len(idx) for label, idx in groups.items()}
+    total_available = sum(sizes.values())
+    if n_total > total_available:
+        raise ValueError(f"n_total={n_total} exceeds the {total_available} objects available across all 10 classes.")
+    min_feasible = sum(min(min_per_class, sizes[label]) for label in GALAXY10_LABELS)
+    if n_total < min_feasible:
+        raise ValueError(
+            f"n_total={n_total} is below {min_feasible}, the minimum needed to give every class at "
+            f"least min_per_class={min_per_class} (capped by classes with fewer available, e.g. "
+            f"Cigar Shaped Smooth Galaxies has only {sizes['Cigar Shaped Smooth Galaxies']}). "
+            "Raise n_total or lower min_per_class — returning a silently-larger-than-requested "
+            "sample here would break the 'exactly n_total, reproducibly' contract."
+        )
+
+    raw_share = {label: n_total * sizes[label] / total_available for label in GALAXY10_LABELS}
+    target = {label: min(sizes[label], max(min_per_class, int(np.floor(raw_share[label])))) for label in GALAXY10_LABELS}
+
+    # Largest-remainder-first order for handing out slots; smallest-remainder-first (reverse) for
+    # taking them back — a class least entitled to its share proportionally gives one back first.
+    by_largest_remainder = sorted(GALAXY10_LABELS, key=lambda label: raw_share[label] - np.floor(raw_share[label]), reverse=True)
+    by_smallest_remainder = list(reversed(by_largest_remainder))
+
+    # The `min_per_class` floor (applied above) can push the initial sum ABOVE n_total on its own
+    # — e.g. min_per_class=2 across 10 classes floors to 20 regardless of n_total, so a small
+    # n_total could already be exceeded before any remainder-based allocation happens. Correct in
+    # whichever direction is needed, deterministically, rather than only ever adding.
+    while sum(target.values()) > n_total:
+        progressed = False
+        for label in by_smallest_remainder:
+            if sum(target.values()) <= n_total:
+                break
+            if target[label] > min_per_class:  # never reduce below the floor the caller asked for
+                target[label] -= 1
+                progressed = True
+        if not progressed:
+            break  # every class already at its own min_per_class floor — can't reduce further
+
+    while sum(target.values()) < n_total:
+        progressed = False
+        for label in by_largest_remainder:
+            if sum(target.values()) >= n_total:
+                break
+            if target[label] < sizes[label]:
+                target[label] += 1
+                progressed = True
+        if not progressed:
+            break  # every class already at its cap — n_total unreachable, already validated above not to exceed total
+
+    sampled_indices = []
+    for label in GALAXY10_LABELS:  # fixed order — see docstring
+        chosen = rng.choice(groups[label], size=target[label], replace=False)
+        sampled_indices.extend(chosen.tolist())
+
+    return table.loc[sampled_indices].reset_index(drop=True)
 
 
 def build_raw_inputs(row: pd.Series) -> dict:

@@ -3,7 +3,7 @@
 # Override on the command line, e.g.: make stage1 ACCELERATE_CONFIG=configs/my_cluster.yaml
 ACCELERATE_CONFIG ?= configs/accelerate_ddp.yaml
 
-.PHONY: test manifest captions cache stage1 eval stage2 install check-access publish infer eval-lightcurve eval-image
+.PHONY: test manifest captions cache stage1 eval stage2 install check-access publish infer eval-lightcurve collect-image-labels score-image-eval
 
 install:
 	uv pip install -e ".[dev]"
@@ -56,8 +56,15 @@ eval-lightcurve:
 		$(if $(BACKEND),--backend $(BACKEND)) \
 		$(if $(LIMIT),--limit $(LIMIT))
 
-eval-image:
-	uv run python -m eval.runners.run_image_eval \
-		$(if $(TRACK),--track $(TRACK)) \
-		$(if $(BACKEND),--backend $(BACKEND)) \
-		$(if $(LIMIT),--limit $(LIMIT))
+# Two steps, deliberately not one target — see eval/README.md. Step 1 is the expensive/billed
+# one (N/SEED/BACKEND optional, default to collect_image_labels.py's own argparse defaults);
+# step 2 needs the exact output path step 1 printed (IN=outputs/eval/raw_generations/...).
+collect-image-labels:
+	uv run python -m eval.runners.collect_image_labels \
+		$(if $(N),--n $(N)) \
+		$(if $(SEED),--seed $(SEED)) \
+		$(if $(BACKEND),--backend $(BACKEND))
+
+score-image-eval:
+	@test -n "$(IN)" || (echo "Usage: make score-image-eval IN=outputs/eval/raw_generations/galaxy10_seed0_n150.json" && exit 1)
+	uv run python -m eval.runners.score_image_eval --in $(IN)

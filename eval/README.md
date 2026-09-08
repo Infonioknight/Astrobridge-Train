@@ -45,23 +45,46 @@ out-of-the-box vision-language model can consume at all; only the equipped model
 module docstring for the one real caveat: the host image's band order hasn't been separately
 verified against this specific dataset).
 
-### Image — Galaxy Zoo morphology (`eval/runners/run_image_eval.py`)
+### Image — Galaxy Zoo morphology, two steps (`collect_image_labels.py` + `score_image_eval.py`)
 
 Real benchmark with a proper train/test split already: `astronolan/galaxy10-aion` (a Galaxy10
 DECaLS release pre-built for AION specifically), 796 test objects, 10 morphology classes.
 
+This track is deliberately split into two scripts, not one — collection (running the models) is
+the expensive, potentially-billed-on-Modal step; scoring is pure post-processing over whatever
+collection already saved. Re-run scoring as many times as you want (different `caption_to_label`
+heuristics, a different crossmatch radius) without ever paying for inference again.
+
+**Step 1 — collect** (`eval/runners/collect_image_labels.py`): draws a seeded, stratified sample
+covering all 10 classes (a floor guarantees even `Cigar Shaped Smooth Galaxies`, which only has 8
+objects total, still appears), runs the base model over `image_rgb` for the whole sample, frees
+it, then runs the equipped model over `image_bands` for the whole sample — same VRAM-bounding
+order as everywhere else in this folder. Saves **raw caption text** from both sides (not just a
+parsed label) plus `ra`/`dec`/`label_name` per object.
+
 ```bash
-uv run python -m eval.runners.run_image_eval --track base_only            # safe, no blockers
-uv run python -m eval.runners.run_image_eval --track equipped_and_base    # see caveat below
+uv run python -m eval.runners.collect_image_labels --n 150 --seed 0
 ```
 
-`base_only` (the default) compares the base model against ground truth using the dataset's
-pre-rendered `image_rgb` field — no AION involved, safe to run today. `equipped_and_base` also
-runs our equipped pipeline through AION, but applies an **unverified hypothesis** about the raw
-`image_bands` field (4 bands where AION expects 3 — see `eval/datasets/image_galaxy10.py`'s
-module docstring for the full reasoning and the verification step to run first). The runner
-prints a loud warning every time this track runs, on purpose — don't trust its `equipped` numbers
-until that's checked.
+Every random decision here is seeded and recorded in the output: `--seed` fully determines the
+sample (`numpy.random.default_rng(seed)`, consumed in a fixed class order — same seed always
+draws the same 150 objects), and generation itself is deterministic (`do_sample=False` on both
+sides) modulo GPU floating-point reduction order, which isn't something this project controls.
+The equipped side applies an **unverified hypothesis** about `image_bands` (4 bands where AION
+expects 3 — see `eval/datasets/image_galaxy10.py`'s module docstring for the full reasoning and
+the verification step to run first); don't trust `equipped_answer` values until that's checked.
+
+Output: `outputs/eval/raw_generations/galaxy10_seed<seed>_n<n>.json`.
+
+**Step 2 — score** (`eval/runners/score_image_eval.py`): loads that file, no model/GPU/Modal
+involved at all.
+
+```bash
+uv run python -m eval.runners.score_image_eval --in outputs/eval/raw_generations/galaxy10_seed0_n150.json
+```
+
+Reports **both** a hard accuracy/F1 breakdown and the crowd-vote-fraction soft score (see below)
+for both sides, side by side.
 
 ### Spectra — not built yet
 
@@ -92,18 +115,46 @@ nowhere else.
 
 ## Metrics & output
 
-Every track reports overall accuracy **and** per-class precision/recall/F1 (`eval/metrics/
+Both tracks report overall accuracy **and** per-class precision/recall/F1 (`eval/metrics/
 classification.py`) — not just a single accuracy number, since both taxonomies here are
 imbalanced enough that a model always guessing the majority class would otherwise look
 deceptively good. A model answer that doesn't match any known label counts as wrong, not silently
 dropped (`eval/metrics/caption_to_label.py`).
 
-Reports land in `outputs/eval/classification/{dataset_slug}_{track}.json`, e.g.
-`outputs/eval/classification/yse_lightcurve_only.json` — same `outputs/eval/` tree
-`scripts/04_eval.py`'s groundedness report already uses.
+The lightcurve track's report lands in `outputs/eval/classification/{dataset_slug}_{track}.json`
+(e.g. `outputs/eval/classification/yse_lightcurve_only.json`) — same `outputs/eval/` tree
+`scripts/04_eval.py`'s groundedness report already uses. The image track's two-step output lands
+in `outputs/eval/raw_generations/` (step 1) and alongside it as `..._scored.json` (step 2).
 
-## `--limit` for quick smoke tests
+### Crowd-vote soft scoring (image track only)
 
-Every runner takes `--limit N` to evaluate only the first N objects — useful for confirming a
-backend/track actually runs end-to-end before committing to a full (potentially billed, on Modal)
-run over the whole benchmark.
+Hard accuracy treats every wrong answer the same — confusing two visually similar spiral classes
+counts exactly as badly as confusing a spiral with a smooth round galaxy. The soft score
+(`eval/metrics/vote_fraction_scoring.py`) fixes that using **real Galaxy Zoo DECaLS crowd vote
+fractions** (`astronolan/gz-decals-embeddings`, crossmatched by RA/Dec via
+`eval/datasets/gz_decals_votes.py`), not an invented distance metric:
+
+1. Each of Galaxy10's 10 classes has a real, published defining rule — transcribed directly from
+   `henrysky/Galaxy10`'s own dataset-construction notebook, e.g. "Barred Spiral" =
+   `has-spiral-arms_yes_debiased > 0.8` AND `bar_no_debiased < 0.2`.
+2. For one object, each class gets a continuous "how well does this object satisfy that rule"
+   margin in `[0, 1]` — an AND-conjunction takes the *weakest* condition (`min`), an OR takes the
+   *best* alternative (`max`).
+3. The whole 10-class vector is rescaled by the *true* class's own margin, so the true class
+   always lands at exactly `1.0` and every other class is "X% as plausible as the truth, according
+   to real crowd votes for this specific object."
+4. A wrong prediction scores `vector[predicted_class]` — a near-miss (a plausible confusion the
+   crowd itself was genuinely divided on) scores well above 0; a wild miss scores near 0.
+
+Objects that don't crossmatch within `--crossmatch-radius-arcsec` (default 1.0), or whose own true
+class has no reliable vote data (`_debiased.mask` set, or the column entirely missing), are
+excluded from the soft score and counted separately in the report (`n_excluded_no_crossmatch`,
+`n_excluded_true_class_unscoreable`) — never silently folded into the average as a 0.
+
+## Quick smoke tests before a full/billed run
+
+Lightcurve: every runner flag lives on `run_lightcurve_eval.py`, which takes `--limit N` to
+evaluate only the first N objects. Image: `collect_image_labels.py`'s `--n` already controls the
+total sample size directly — just pass a small `--n` (e.g. `--n 20`) for a quick end-to-end check
+before committing to a full 150+ run, especially on `--backend modal` where every collect run is
+billed.
