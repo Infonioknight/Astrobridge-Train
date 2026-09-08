@@ -107,11 +107,11 @@ nowhere else.
   modal secret create huggingface-secret HF_TOKEN=hf_your_token_here
   modal deploy eval/backend.py
   ```
-  **Not yet live-verified** whether `modal deploy` cleanly targets `eval/backend.py` as a library
-  file rather than a script meant to be the sole entrypoint — spike this once (deploy, then a
-  throwaway `modal.Function.from_name("astrobridge-eval-backend", "_equipped_infer").remote(...)`
-  call) before trusting `--backend modal` end-to-end. See `eval/backend.py`'s module docstring for
-  the fallback design if it doesn't round-trip cleanly.
+  **Live-verified**: deployed and round-trip tested against both `_equipped_infer` and
+  `_base_infer` — both returned real generations end-to-end. One real fix needed along the way:
+  Modal's CLI looks for a variable literally named `app` by default, so the `modal.App` instance
+  in `eval/backend.py` is named `app`, not `modal_app` (an earlier version used `modal_app` and
+  failed deploy with `module 'backend' has no attribute 'app'`).
 
 ## Metrics & output
 

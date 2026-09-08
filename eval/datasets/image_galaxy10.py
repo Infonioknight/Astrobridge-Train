@@ -199,8 +199,15 @@ def build_raw_inputs(row: pd.Series) -> dict:
     `load_galaxy10_aion_bands` row's `image_bands` into the `{"image": {"pixel_values": ...}}`
     shape `generate_caption` expects. Raises loudly if `image_bands` doesn't have exactly 4 bands
     — a real schema change should fail fast here, not silently select the wrong 3.
+
+    `image_bands` deserializes from parquet as triple-nested `dtype=object` numpy arrays (outer
+    (4,) object array -> each element a (96,) object array -> each element a real (96,) float32
+    array), not one contiguous numeric block — confirmed real via a live check, not assumed.
+    `np.asarray(b, dtype=np.float32)` on the middle layer directly raises `ValueError: setting an
+    array element with a sequence` (numpy can't auto-flatten a doubly-nested object array in one
+    call), so each level is stacked explicitly here instead.
     """
-    bands = np.stack([np.asarray(b, dtype=np.float32) for b in row["image_bands"]], axis=0)
+    bands = np.stack([np.stack([np.asarray(px, dtype=np.float32) for px in band]) for band in row["image_bands"]])
     if bands.shape[0] != 4:
         raise ValueError(
             f"Expected 4 bands (hypothesized {_HYPOTHESIZED_BAND_ORDER}), got {bands.shape[0]} — "
