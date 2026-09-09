@@ -3,7 +3,7 @@
 # Override on the command line, e.g.: make stage1 ACCELERATE_CONFIG=configs/my_cluster.yaml
 ACCELERATE_CONFIG ?= configs/accelerate_ddp.yaml
 
-.PHONY: test manifest captions cache stage1 eval stage2 install check-access publish infer eval-lightcurve collect-image-labels score-image-eval
+.PHONY: test manifest captions cache stage1 eval stage2 install check-access publish infer eval-lightcurve collect-image-labels score-image-eval score-image-eval-debiased
 
 install:
 	uv pip install -e ".[dev]"
@@ -68,3 +68,9 @@ collect-image-labels:
 score-image-eval:
 	@test -n "$(IN)" || (echo "Usage: make score-image-eval IN=outputs/eval/raw_generations/galaxy10_seed0_n150.json" && exit 1)
 	uv run python -m eval.runners.score_image_eval --in $(IN)
+
+# Separate, parked script — needs a real network crossmatch, meaningfully slower than
+# score-image-eval above, so it's not bundled into that target automatically.
+score-image-eval-debiased:
+	@test -n "$(IN)" || (echo "Usage: make score-image-eval-debiased IN=outputs/eval/raw_generations/galaxy10_seed0_n150.json" && exit 1)
+	uv run python -m eval.runners.score_image_eval_debiased --in $(IN)

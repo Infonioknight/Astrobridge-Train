@@ -79,3 +79,27 @@ def predict_label_from_code(answer: str, class_codes: dict[str, str]) -> str | N
     if match is None:
         return None
     return class_codes.get(match.group(1))
+
+
+def make_predictor(
+    answer_format: str,
+    label_vocabulary: list[str],
+    synonyms: dict[str, list[str]] | None = None,
+    class_codes: dict[str, str] | None = None,
+):
+    """Picks `predict_label` or `predict_label_from_code` based on how a collect script actually
+    prompted the model — shared here (not duplicated per runner script) since both
+    `eval/runners/score_image_eval.py` and `eval/runners/score_image_eval_debiased.py` need the
+    exact same logic: using the wrong parser for a given answer format silently returns `None` for
+    every object rather than erroring, so getting this dispatch right matters in more than one
+    place. Kept dataset-agnostic (parameters, not hardcoded Galaxy10 constants) so this also works
+    for the lightcurve/SN-typing track's `SN_TYPE_SYNONYMS`.
+
+    `answer_format` is expected to be read from the collect file itself (`data.get("answer_format",
+    "free_text")` — older files predate the key and default to free-text matching), not assumed.
+    """
+    if answer_format == "digit_code":
+        if class_codes is None:
+            raise ValueError("class_codes is required when answer_format='digit_code'.")
+        return lambda answer: predict_label_from_code(answer, class_codes)
+    return lambda answer: predict_label(answer, label_vocabulary, synonyms)

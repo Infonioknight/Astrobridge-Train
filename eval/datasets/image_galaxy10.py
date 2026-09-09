@@ -77,6 +77,28 @@ CLASS_CODE_PROMPT = (
     "Image class code:"
 )
 
+# A real, diagnostic finding (confirmed live via a full n=150 collect run) motivates this: the
+# equipped model's answers, under CLASS_CODE_PROMPT above, never once emitted digits 0/3/8/9
+# across 150 real objects, regardless of image content — a hard gap, not scattered wrong guesses.
+# Whether that's a bias in the specific DIGIT TOKENS (fixable with prompting) or genuine
+# confusion between the CLASSES those digits happened to be assigned to (needs a training-side
+# fix) can't be told apart without re-running under a different digit assignment. SHUFFLED_CLASS_
+# CODES is a full derangement (cyclic shift by 5 — every class gets a different digit than
+# CLASS_CODES assigned it; confirmed no class keeps its original code) for exactly that test.
+# collect_image_labels.py's --shuffle-codes flag uses this instead of CLASS_CODES.
+SHUFFLED_CLASS_CODES: dict[str, str] = {str((i + 5) % 10): label for i, label in enumerate(GALAXY10_LABELS)}
+assert all(SHUFFLED_CLASS_CODES[code] != CLASS_CODES[code] for code in CLASS_CODES), (
+    "SHUFFLED_CLASS_CODES must be a true derangement of CLASS_CODES — every code maps to a "
+    "DIFFERENT class than the default, or the whole point of the shuffle experiment is broken."
+)
+
+SHUFFLED_CLASS_CODE_LEGEND = "\n".join(f"{code}={name}" for code, name in SHUFFLED_CLASS_CODES.items())
+SHUFFLED_CLASS_CODE_PROMPT = (
+    "Galaxy morphology classifier. Output ONLY the digit code, nothing else.\n"
+    f"{SHUFFLED_CLASS_CODE_LEGEND}\n"
+    "Image class code:"
+)
+
 # Working hypothesis only (see module docstring) — verify before trusting load_galaxy10_aion_bands.
 _HYPOTHESIZED_BAND_ORDER = ["g", "r", "i", "z"]
 _KEEP_BAND_INDICES = [0, 1, 3]  # g, r, z — dropping index 2 ("i")

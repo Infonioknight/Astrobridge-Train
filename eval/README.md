@@ -45,7 +45,7 @@ out-of-the-box vision-language model can consume at all; only the equipped model
 module docstring for the one real caveat: the host image's band order hasn't been separately
 verified against this specific dataset).
 
-### Image — Galaxy Zoo morphology, two steps (`collect_image_labels.py` + `score_image_eval.py`)
+### Image — Galaxy Zoo morphology, collect + score (`collect_image_labels.py`, then `score_image_eval.py` and/or `score_image_eval_debiased.py`)
 
 Real benchmark with a proper train/test split already: `astronolan/galaxy10-aion` (a Galaxy10
 DECaLS release pre-built for AION specifically), 796 test objects, 10 morphology classes.
@@ -76,15 +76,26 @@ the verification step to run first); don't trust `equipped_answer` values until 
 
 Output: `outputs/eval/raw_generations/galaxy10_seed<seed>_n<n>.json`.
 
-**Step 2 — score** (`eval/runners/score_image_eval.py`): loads that file, no model/GPU/Modal
-involved at all.
+**Step 2 — score, default path** (`eval/runners/score_image_eval.py`): loads that file, no
+model/GPU/Modal/network involved at all — fast, always safe to re-run.
 
 ```bash
 uv run python -m eval.runners.score_image_eval --in outputs/eval/raw_generations/galaxy10_seed0_n150.json
 ```
 
-Reports **both** a hard accuracy/F1 breakdown and the crowd-vote-fraction soft score (see below)
+Reports a hard accuracy/F1 breakdown **and** the coarse group score (see "Group scoring" below)
 for both sides, side by side.
+
+**Step 2b — score, debiased vote-fraction path** (`eval/runners/score_image_eval_debiased.py`):
+a separate, parked script — needs a real network crossmatch against
+`astronolan/gz-decals-embeddings`, meaningfully slower than the default path above, so it's kept
+independent rather than bundled into every scoring run.
+
+```bash
+uv run python -m eval.runners.score_image_eval_debiased --in outputs/eval/raw_generations/galaxy10_seed0_n150.json
+```
+
+Reports the crowd-vote-fraction soft score (see "Crowd-vote soft scoring" below) for both sides.
 
 ### Spectra — not built yet
 
@@ -123,8 +134,11 @@ dropped (`eval/metrics/caption_to_label.py`).
 
 The lightcurve track's report lands in `outputs/eval/classification/{dataset_slug}_{track}.json`
 (e.g. `outputs/eval/classification/yse_lightcurve_only.json`) — same `outputs/eval/` tree
-`scripts/04_eval.py`'s groundedness report already uses. The image track's two-step output lands
-in `outputs/eval/raw_generations/` (step 1) and alongside it as `..._scored.json` (step 2).
+`scripts/04_eval.py`'s groundedness report already uses. The image track's collect step lands in
+`outputs/eval/raw_generations/`; `score_image_eval.py` writes `..._scored.json` alongside it
+(hard + group), `score_image_eval_debiased.py` writes `..._debiased_scored.json` (soft) — two
+separate files since the two scoring scripts are meant to be run independently, not always
+together.
 
 ### Crowd-vote soft scoring (image track only)
 

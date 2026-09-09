@@ -28,6 +28,9 @@ from captioner.utils.logging import get_logger
 from eval.backend import free_local_backend, get_backend
 from eval.datasets.image_galaxy10 import (
     CLASS_CODE_PROMPT,
+    CLASS_CODES,
+    SHUFFLED_CLASS_CODE_PROMPT,
+    SHUFFLED_CLASS_CODES,
     build_raw_inputs,
     decode_rgb_image,
     load_galaxy10_aion_bands,
@@ -43,7 +46,6 @@ logger = get_logger(__name__)
 # confirmed live via eval/prompt_playground.py to get both models to answer compliantly and
 # correctly) replaces it entirely, not just as a default — see eval/datasets/image_galaxy10.py's
 # docstring for why the digit format itself matters, not just this specific wording.
-DEFAULT_QUESTION = CLASS_CODE_PROMPT
 
 # Base model needs real room to reach an answer (even with enable_thinking=False leaving a
 # 1-token close tag) — equipped needs much less, and a tight budget here doubles as a signal:
@@ -61,7 +63,20 @@ def main() -> None:
     parser.add_argument("--n", type=int, default=150, help="total sample size across all 10 classes")
     parser.add_argument("--min-per-class", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0, help="the ONE seed that determines the whole sample")
-    parser.add_argument("--question", default=DEFAULT_QUESTION)
+    parser.add_argument("--question", default=None, help="defaults to CLASS_CODE_PROMPT, or SHUFFLED_CLASS_CODE_PROMPT if --shuffle-codes is set")
+    parser.add_argument(
+        "--shuffle-codes", action="store_true", default=False,
+        help="Use SHUFFLED_CLASS_CODES (a full derangement of the default digit->class mapping) "
+             "instead of CLASS_CODES — a real diagnostic need, not a toy: a live n=150 run found "
+             "the equipped model never once emits 4 specific digits (0/3/8/9) regardless of image "
+             "content. Re-running under a different digit assignment is how you tell apart 'the "
+             "model is biased against those DIGIT tokens' (fixable with prompting) from 'the model "
+             "is genuinely confused between those CLASSES' (needs a training-side fix) — see "
+             "eval/datasets/image_galaxy10.py's SHUFFLED_CLASS_CODES docstring. The output "
+             "records EXACTLY which mapping was used (`class_codes`), so score_image_eval.py and "
+             "score_image_eval_debiased.py parse either kind of file correctly without needing "
+             "this flag repeated at scoring time.",
+    )
     parser.add_argument("--base-max-new-tokens", type=int, default=DEFAULT_BASE_MAX_NEW_TOKENS)
     parser.add_argument("--equipped-max-new-tokens", type=int, default=DEFAULT_EQUIPPED_MAX_NEW_TOKENS)
     parser.add_argument(
@@ -72,8 +87,19 @@ def main() -> None:
              "a digit code, regardless of --base-max-new-tokens. Off by default for exactly that "
              "reason; pass this flag to opt back into the model's real default behavior.",
     )
-    parser.add_argument("--out", default=None, help="defaults to outputs/eval/raw_generations/galaxy10_seed<seed>_n<n>.json")
+    parser.add_argument("--out", default=None, help="defaults to outputs/eval/raw_generations/galaxy10_seed<seed>_n<n>.json (or ..._shuffled.json if --shuffle-codes)")
     args = parser.parse_args(remaining_argv())
+
+    class_codes = SHUFFLED_CLASS_CODES if args.shuffle_codes else CLASS_CODES
+    default_question = SHUFFLED_CLASS_CODE_PROMPT if args.shuffle_codes else CLASS_CODE_PROMPT
+    question = args.question if args.question is not None else default_question
+    if args.question is not None and args.shuffle_codes:
+        logger.warning(
+            "--question was given explicitly AND --shuffle-codes was set — using your --question "
+            "verbatim, but `class_codes` recorded in the output is still SHUFFLED_CLASS_CODES. "
+            "Make sure your custom prompt's legend actually matches that mapping, or scoring will "
+            "parse digits against the wrong class names."
+        )
 
     cfg = load_config("base", "data", "modalities", "model", "stage2")
 
@@ -95,7 +121,7 @@ def main() -> None:
     for _, row in tqdm(sampled_rgb.iterrows(), total=len(sampled_rgb), desc="collect [base]"):
         image = decode_rgb_image(row["image_rgb"])
         base_answers[row["Galaxy10_DECals_index"]] = base_backend.generate(
-            {"image": image}, args.question, args.base_max_new_tokens,
+            {"image": image}, question, args.base_max_new_tokens,
         )
     if args.backend == "local":
         free_local_backend(base_backend)
@@ -108,7 +134,7 @@ def main() -> None:
     for _, row in tqdm(sampled_bands.iterrows(), total=len(sampled_bands), desc="collect [equipped]"):
         raw_inputs = build_raw_inputs(row)
         equipped_answers[row["Galaxy10_DECals_index"]] = equipped_backend.generate(
-            raw_inputs, args.question, args.equipped_max_new_tokens,
+            raw_inputs, question, args.equipped_max_new_tokens,
         )
     if args.backend == "local":
         free_local_backend(equipped_backend)
@@ -128,11 +154,17 @@ def main() -> None:
     output = {
         "dataset": "astronolan/galaxy10-aion",
         "repo_id": args.repo_id,
-        "question": args.question,
+        "question": question,
         # "digit_code" tells score_image_eval.py to parse answers via predict_label_from_code
-        # (against CLASS_CODES) rather than predict_label's free-text keyword matching — the two
-        # parsers are not interchangeable, see caption_to_label.py's docstrings for why.
+        # (against `class_codes` below) rather than predict_label's free-text keyword matching —
+        # the two parsers are not interchangeable, see caption_to_label.py's docstrings for why.
         "answer_format": "digit_code",
+        # Self-describing on purpose: recorded EVERY run, not just shuffled ones, so scoring never
+        # has to assume which mapping produced a given file — it reads this instead of importing
+        # the (possibly wrong) global CLASS_CODES default. See --shuffle-codes' help for why this
+        # matters concretely (a real diagnostic run needs the non-default mapping respected).
+        "class_codes": class_codes,
+        "shuffle_codes": args.shuffle_codes,
         "base_max_new_tokens": args.base_max_new_tokens,
         "equipped_max_new_tokens": args.equipped_max_new_tokens,
         "base_enable_thinking": args.base_enable_thinking,
@@ -140,7 +172,11 @@ def main() -> None:
         "objects": objects,
     }
 
-    out_path = Path(args.out) if args.out else Path(f"outputs/eval/raw_generations/galaxy10_seed{args.seed}_n{args.n}.json")
+    if args.out:
+        out_path = Path(args.out)
+    else:
+        suffix = "_shuffled" if args.shuffle_codes else ""
+        out_path = Path(f"outputs/eval/raw_generations/galaxy10_seed{args.seed}_n{args.n}{suffix}.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(output, indent=2))
     logger.info(f"Wrote {len(objects)} raw generations to {out_path}")
