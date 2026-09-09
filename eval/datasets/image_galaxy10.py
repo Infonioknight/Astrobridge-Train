@@ -56,6 +56,27 @@ GALAXY10_LABELS = [
     "Edge-on Galaxies with Bulge",
 ]
 
+# Digit-code label mapping, `label` int order — matches GALAXY10_LABELS position-for-position.
+# Confirmed real via a live prompt-engineering pass (eval/prompt_playground.py): a short, closed
+# digit-code answer space is both far easier for a model to emit compliantly (one token, no
+# free-text drift) and far easier to parse reliably (eval/metrics/caption_to_label.py's
+# predict_label_from_code) than matching label-name keywords in free text. This is the format
+# eval/runners/collect_image_labels.py actually uses now, not GALAXY10_LABEL_SYNONYMS-style
+# free-text matching, which was the original (worse) design.
+CLASS_CODES: dict[str, str] = {str(i): label for i, label in enumerate(GALAXY10_LABELS)}
+
+CLASS_CODE_LEGEND = "\n".join(f"{code}={name}" for code, name in CLASS_CODES.items())
+
+# The exact prompt confirmed live to work on both sides — ending mid-sentence ("Image class
+# code:") matters for the equipped side specifically, which never goes through a chat template at
+# all (see generate_caption's docstring): it's a genuine raw-text continuation there, not a
+# stylistic touch, so the model completes it directly rather than starting a fresh turn.
+CLASS_CODE_PROMPT = (
+    "Galaxy morphology classifier. Output ONLY the digit code, nothing else.\n"
+    f"{CLASS_CODE_LEGEND}\n"
+    "Image class code:"
+)
+
 # Working hypothesis only (see module docstring) — verify before trusting load_galaxy10_aion_bands.
 _HYPOTHESIZED_BAND_ORDER = ["g", "r", "i", "z"]
 _KEEP_BAND_INDICES = [0, 1, 3]  # g, r, z — dropping index 2 ("i")

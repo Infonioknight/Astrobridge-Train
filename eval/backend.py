@@ -64,14 +64,20 @@ def get_backend(
     device: str = "cuda",
     modality_names: list[str] | None = None,
     modal_app_name: str = "astrobridge-eval-backend",
+    enable_thinking: bool | None = None,
 ) -> EvalBackend:
     """The one function every runner calls. `repo_id`/`modality_names` only matter for
-    `side="equipped"`; ignored (but harmless to pass) for `side="base"`.
+    `side="equipped"`; ignored (but harmless to pass) for `side="base"`. `enable_thinking` is the
+    reverse — only matters for `side="base"` — see `generate_qwen_native_vision_answer`'s
+    docstring for what it actually does and why it defaults to `None` (the model's own default,
+    thinking ON) rather than being force-disabled here.
     """
     if kind == "local":
-        return _local_backend(side, cfg, repo_id=repo_id, device=device, modality_names=modality_names)
+        return _local_backend(
+            side, cfg, repo_id=repo_id, device=device, modality_names=modality_names, enable_thinking=enable_thinking,
+        )
     if kind == "modal":
-        return _modal_backend(side, modal_app_name=modal_app_name)
+        return _modal_backend(side, modal_app_name=modal_app_name, enable_thinking=enable_thinking)
     raise ValueError(f"kind={kind!r} not recognised — expected 'local' or 'modal'.")
 
 
@@ -85,6 +91,7 @@ def _local_backend(
     repo_id: str | None,
     device: str,
     modality_names: list[str] | None,
+    enable_thinking: bool | None = None,
 ) -> EvalBackend:
     from captioner.inference import (
         generate_caption,
@@ -121,6 +128,7 @@ def _local_backend(
             )
         return generate_qwen_native_vision_answer(
             vision_model, processor, device, question, raw_inputs["image"], max_new_tokens=max_new_tokens,
+            enable_thinking=enable_thinking,
         )
 
     return EvalBackend(side="base", _generate=_generate)
@@ -228,9 +236,10 @@ def _equipped_infer(
     volumes={"/root/.cache/huggingface": hf_cache_volume},
     timeout=1800,
 )
-def _base_infer(image_bytes: bytes, question: str, max_new_tokens: int = 128) -> str:
+def _base_infer(image_bytes: bytes, question: str, max_new_tokens: int = 128, enable_thinking: bool | None = None) -> str:
     """`image_bytes`: a PNG/JPEG-encoded picture, not raw pixel_values — the base model's native
     vision pathway consumes an ordinary image, decoded here inside the remote container.
+    `enable_thinking`: see `generate_qwen_native_vision_answer`'s docstring.
     """
     import io
 
@@ -249,13 +258,17 @@ def _base_infer(image_bytes: bytes, question: str, max_new_tokens: int = 128) ->
     image = Image.open(io.BytesIO(image_bytes))
     return generate_qwen_native_vision_answer(
         vision_model, processor, device, question, image, max_new_tokens=max_new_tokens,
+        enable_thinking=enable_thinking,
     )
 
 
-def _modal_backend(side: Side, *, modal_app_name: str) -> EvalBackend:
+def _modal_backend(side: Side, *, modal_app_name: str, enable_thinking: bool | None = None) -> EvalBackend:
     """Talks to an already-`modal deploy`ed app — never defines `@app.function` itself (that
     lives above, once, shared by every runner). `modal deploy eval/backend.py` must have been
     run at least once before this works; see the module-level TODO/verification note above.
+    Redeploy again after any change to `_equipped_infer`/`_base_infer` (including a new parameter
+    like `enable_thinking`) — a running deployment keeps serving whatever code it was deployed
+    with until `modal deploy` is re-run.
     """
     if side == "equipped":
         fn = modal.Function.from_name(modal_app_name, "_equipped_infer")
@@ -277,6 +290,9 @@ def _modal_backend(side: Side, *, modal_app_name: str) -> EvalBackend:
 
         buf = io.BytesIO()
         raw_inputs["image"].save(buf, format="PNG")
-        return fn.remote(image_bytes=buf.getvalue(), question=question, max_new_tokens=max_new_tokens)
+        return fn.remote(
+            image_bytes=buf.getvalue(), question=question, max_new_tokens=max_new_tokens,
+            enable_thinking=enable_thinking,
+        )
 
     return EvalBackend(side="base", _generate=_generate)

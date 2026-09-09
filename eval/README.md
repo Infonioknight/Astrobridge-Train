@@ -151,6 +151,21 @@ class has no reliable vote data (`_debiased.mask` set, or the column entirely mi
 excluded from the soft score and counted separately in the report (`n_excluded_no_crossmatch`,
 `n_excluded_true_class_unscoreable`) — never silently folded into the average as a 0.
 
+### Group scoring (image track only) — a simpler complement to the soft score, not a replacement
+
+`eval/metrics/group_scoring.py` reports a third, deliberately coarser number: `1.0` exact match,
+`0.5` same top-level morphology group, `0.0` different group or unparseable. The 4 groups —
+**Smooth** (Round/In-between/Cigar), **Spiral** (Barred/Unbarred Tight/Unbarred Loose), **Edge-On**
+(with/without Bulge), **Disturbed/Merging** — map onto the real Galaxy Zoo decision tree's own
+top-level branches, not an arbitrary split.
+
+Needs no crossmatch and no external vote data at all, so it's always computable — but it's coarser
+than the soft score by design: a near-miss within a group (Round Smooth predicted as In-between
+Round Smooth) scores the same `0.5` as a real miss within that same group (Round Smooth predicted
+as Cigar Shaped), and a plausible cross-group confusion (an edge-on spiral vs. a face-on spiral)
+scores a flat `0.0` the soft score might not. Use both — group scoring for a quick, easily
+sanity-checked read; the soft score for the actual fine-grained signal.
+
 ## Quick smoke tests before a full/billed run
 
 Lightcurve: every runner flag lives on `run_lightcurve_eval.py`, which takes `--limit N` to

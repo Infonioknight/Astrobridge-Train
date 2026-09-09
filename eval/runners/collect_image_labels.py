@@ -27,7 +27,7 @@ from captioner.utils.config import load_config, remaining_argv
 from captioner.utils.logging import get_logger
 from eval.backend import free_local_backend, get_backend
 from eval.datasets.image_galaxy10 import (
-    GALAXY10_LABELS,
+    CLASS_CODE_PROMPT,
     build_raw_inputs,
     decode_rgb_image,
     load_galaxy10_aion_bands,
@@ -37,9 +37,20 @@ from eval.datasets.image_galaxy10 import (
 
 logger = get_logger(__name__)
 
-DEFAULT_QUESTION = (
-    "Classify this galaxy's morphology. Choose exactly one: " + ", ".join(GALAXY10_LABELS) + "."
-)
+# The free-text "name one of these 10 labels" prompt this used to default to was confirmed live
+# (a real n=20 collection run, see git history) to produce ~5-15% parseable answers on either
+# side — the model would ramble instead of naming a class. CLASS_CODE_PROMPT (digit-code format,
+# confirmed live via eval/prompt_playground.py to get both models to answer compliantly and
+# correctly) replaces it entirely, not just as a default — see eval/datasets/image_galaxy10.py's
+# docstring for why the digit format itself matters, not just this specific wording.
+DEFAULT_QUESTION = CLASS_CODE_PROMPT
+
+# Base model needs real room to reach an answer (even with enable_thinking=False leaving a
+# 1-token close tag) — equipped needs much less, and a tight budget here doubles as a signal:
+# if it ever needs more than this to state a code, that itself means the caption-tuned prior is
+# winning over the instruction, worth noticing rather than just papering over with more tokens.
+DEFAULT_BASE_MAX_NEW_TOKENS = 40
+DEFAULT_EQUIPPED_MAX_NEW_TOKENS = 8
 
 
 def main() -> None:
@@ -51,7 +62,16 @@ def main() -> None:
     parser.add_argument("--min-per-class", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0, help="the ONE seed that determines the whole sample")
     parser.add_argument("--question", default=DEFAULT_QUESTION)
-    parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--base-max-new-tokens", type=int, default=DEFAULT_BASE_MAX_NEW_TOKENS)
+    parser.add_argument("--equipped-max-new-tokens", type=int, default=DEFAULT_EQUIPPED_MAX_NEW_TOKENS)
+    parser.add_argument(
+        "--base-enable-thinking", action="store_true", default=False,
+        help="Qwen/Qwen3.5-9B's own chat template opens a reasoning block by default (see "
+             "captioner.inference.generate_qwen_native_vision_answer's docstring) — confirmed live "
+             "that leaving it on makes the base model truncate mid-reasoning before ever reaching "
+             "a digit code, regardless of --base-max-new-tokens. Off by default for exactly that "
+             "reason; pass this flag to opt back into the model's real default behavior.",
+    )
     parser.add_argument("--out", default=None, help="defaults to outputs/eval/raw_generations/galaxy10_seed<seed>_n<n>.json")
     args = parser.parse_args(remaining_argv())
 
@@ -68,12 +88,14 @@ def main() -> None:
     sampled_bands = sampled_bands.set_index("Galaxy10_DECals_index").loc[sampled_rgb["Galaxy10_DECals_index"]].reset_index()
 
     # --- Side 1: base model, over the whole sample, via image_rgb --------------------------
-    base_backend = get_backend(args.backend, side="base", cfg=cfg, device=args.device)
+    base_backend = get_backend(
+        args.backend, side="base", cfg=cfg, device=args.device, enable_thinking=args.base_enable_thinking,
+    )
     base_answers: dict[int, str] = {}
     for _, row in tqdm(sampled_rgb.iterrows(), total=len(sampled_rgb), desc="collect [base]"):
         image = decode_rgb_image(row["image_rgb"])
         base_answers[row["Galaxy10_DECals_index"]] = base_backend.generate(
-            {"image": image}, args.question, args.max_new_tokens,
+            {"image": image}, args.question, args.base_max_new_tokens,
         )
     if args.backend == "local":
         free_local_backend(base_backend)
@@ -86,7 +108,7 @@ def main() -> None:
     for _, row in tqdm(sampled_bands.iterrows(), total=len(sampled_bands), desc="collect [equipped]"):
         raw_inputs = build_raw_inputs(row)
         equipped_answers[row["Galaxy10_DECals_index"]] = equipped_backend.generate(
-            raw_inputs, args.question, args.max_new_tokens,
+            raw_inputs, args.question, args.equipped_max_new_tokens,
         )
     if args.backend == "local":
         free_local_backend(equipped_backend)
@@ -107,7 +129,13 @@ def main() -> None:
         "dataset": "astronolan/galaxy10-aion",
         "repo_id": args.repo_id,
         "question": args.question,
-        "max_new_tokens": args.max_new_tokens,
+        # "digit_code" tells score_image_eval.py to parse answers via predict_label_from_code
+        # (against CLASS_CODES) rather than predict_label's free-text keyword matching — the two
+        # parsers are not interchangeable, see caption_to_label.py's docstrings for why.
+        "answer_format": "digit_code",
+        "base_max_new_tokens": args.base_max_new_tokens,
+        "equipped_max_new_tokens": args.equipped_max_new_tokens,
+        "base_enable_thinking": args.base_enable_thinking,
         "sampling": {"n": args.n, "min_per_class": args.min_per_class, "seed": args.seed},
         "objects": objects,
     }

@@ -242,7 +242,10 @@ def load_qwen_native_vision_model(cfg: DictConfig, device: str = "cuda"):
 
 
 @torch.no_grad()
-def generate_qwen_native_vision_answer(model, processor, device: str, question: str, image, max_new_tokens: int = 128) -> str:
+def generate_qwen_native_vision_answer(
+    model, processor, device: str, question: str, image, max_new_tokens: int = 128,
+    enable_thinking: bool | None = None,
+) -> str:
     """The "plain Qwen, genuinely out of the box" side of a comparison against generate_caption's
     fully-equipped answer — routed through Qwen's own native multimodal pathway instead of this
     project's AION encoders + fusion stack. Nothing this project trained touches this call.
@@ -256,10 +259,24 @@ def generate_qwen_native_vision_answer(model, processor, device: str, question: 
     Confirmed real, not guessed: Qwen's chat_template.jinja checks for an "image" key in each
     content block (`'image' in item or 'image_url' in item or item.type == 'image'`), matching
     the {"type": "image", "image": ...} shape used below.
+
+    `enable_thinking`: `Qwen/Qwen3.5-9B`'s real chat template has a built-in reasoning mode —
+    confirmed by reading the template directly: `add_generation_prompt` normally opens an empty
+    `<think>\n` block that the model fills with step-by-step reasoning before ever reaching an
+    answer, which is exactly why free-form questions ("what class is this?") were getting
+    truncated mid-reasoning even at generous `max_new_tokens`. Passing `enable_thinking=False`
+    closes that block immediately (`<think>\n\n</think>\n\n`), forcing a direct answer — confirmed
+    live via `apply_chat_template(..., enable_thinking=False)`. Left as `None` (the template's own
+    default, thinking ON) unless the caller opts out, since "genuinely out of the box" for a
+    general caption/comparison use case means Qwen's actual default behavior, not a modification
+    — callers that specifically need a short, direct answer (e.g. eval/prompt_playground.py's
+    classification prompts) should pass `enable_thinking=False` explicitly.
     """
     messages = [{"role": "user", "content": [{"type": "image", "image": image}, {"type": "text", "text": question}]}]
+    chat_template_kwargs = {} if enable_thinking is None else {"enable_thinking": enable_thinking}
     inputs = processor.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt",
+        **chat_template_kwargs,
     ).to(device)
 
     device_type = "cuda" if str(device).startswith("cuda") else "cpu"

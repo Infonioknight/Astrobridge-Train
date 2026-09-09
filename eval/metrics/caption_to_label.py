@@ -55,3 +55,27 @@ def predict_label(
         if any(c in text for c in candidates):
             return label
     return None
+
+
+def predict_label_from_code(answer: str, class_codes: dict[str, str]) -> str | None:
+    """Parses a digit-code answer (e.g. `" 2"`, `"5."`, `"Code: 5"`) into the label it maps to,
+    via `class_codes` (digit string -> label name — see `eval.datasets.image_galaxy10.CLASS_CODES`).
+
+    Real, separate parser from `predict_label` above, not a variant of it: once
+    `eval.datasets.image_galaxy10.CLASS_CODE_PROMPT` is the actual prompt in use (confirmed live,
+    via `eval/prompt_playground.py`, to get much more reliable format compliance than asking a
+    model to name a class from a long list in free text), the answers being parsed are bare digit
+    codes, not label-name text — `predict_label`'s keyword/synonym matching would never match a
+    digit at all and would return `None` for every single object, silently.
+
+    Matches the first STANDALONE digit in `answer` — not a digit embedded in a longer number, so
+    `"10"` or `"2.5"` don't accidentally match code `"2"` — via a regex lookaround, not a plain
+    substring search (which `"2" in "12"` would wrongly pass). `None` if no valid standalone code
+    digit appears at all.
+    """
+    import re
+
+    match = re.search(r"(?<!\d)([0-9])(?!\d)", answer)
+    if match is None:
+        return None
+    return class_codes.get(match.group(1))

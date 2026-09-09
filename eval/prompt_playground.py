@@ -33,31 +33,16 @@ from PIL import Image
 
 from captioner.utils.config import load_config
 from eval.backend import free_local_backend, get_backend
+from eval.datasets.image_galaxy10 import CLASS_CODE_PROMPT
 
 # --- Class code mapping -----------------------------------------------------------------------
-# Codes kept short (single digit / short token) so the model has minimal room to pad before
-# emitting its answer, and so the answer is cheap to validate against MAX_NEW_TOKENS.
-CLASS_CODES: dict[str, str] = {
-    "0": "Disturbed Galaxies",
-    "1": "Merging Galaxies",
-    "2": "Round Smooth Galaxies",
-    "3": "In-between Round Smooth Galaxies",
-    "4": "Cigar Shaped Smooth Galaxies",
-    "5": "Barred Spiral Galaxies",
-    "6": "Unbarred Tight Spiral Galaxies",
-    "7": "Unbarred Loose Spiral Galaxies",
-    "8": "Edge-on Galaxies without Bulge",
-    "9": "Edge-on Galaxies with Bulge",
-}
-
-_CODE_LEGEND = "\n".join(f"{code}={name}" for code, name in CLASS_CODES.items())
+# The mapping and the prompt itself now live in eval/datasets/image_galaxy10.py (CLASS_CODES,
+# CLASS_CODE_PROMPT) — moved there once this prompt was confirmed working, so the formal eval
+# bench (collect_image_labels.py/score_image_eval.py) uses this exact same prompt/mapping, kept
+# in one place rather than duplicated between the playground and the real pipeline.
 
 # --- Edit these two and re-run --------------------------------------------------------------
-OOB_PROMPT = (
-    "Galaxy morphology classifier. Output ONLY the digit code, nothing else.\n"
-    f"{_CODE_LEGEND}\n"
-    "Image class code:"
-)
+OOB_PROMPT = CLASS_CODE_PROMPT
 EQUIPPED_PROMPT = OOB_PROMPT  # start identical; diverge once you see how each model actually responds
 
 # Base model was truncating mid-reasoning at 5 tokens — give it room to actually land on an
@@ -66,6 +51,14 @@ OOB_MAX_NEW_TOKENS = 40
 # Equipped model: keep tight. If it needs more than this to state a code, that itself is the
 # finding — it means the caption prior is winning even under a constrained-format prompt.
 EQUIPPED_MAX_NEW_TOKENS = 8
+
+# Confirmed real, not a guess: Qwen/Qwen3.5-9B's own chat template opens an empty <think> block
+# by default, which is exactly why the base model was truncating mid-reasoning at any token
+# budget — it was never going to reach a digit until it finished "thinking" first. False forces
+# the template to close that block immediately (<think>\n\n</think>\n\n), skipping straight to an
+# answer. Only affects the base side — the equipped side never goes through Qwen's chat template
+# at all (see captioner.inference.generate_caption).
+OOB_ENABLE_THINKING = False
 # ---------------------------------------------------------------------------------------------
 
 TEST_IMAGES = [
@@ -84,7 +77,9 @@ def main() -> None:
     cfg = load_config("base", "data", "modalities", "model", "stage2")
 
     print("<OOB>")
-    base_backend = get_backend(args.backend, side="base", cfg=cfg, device=args.device)
+    base_backend = get_backend(
+        args.backend, side="base", cfg=cfg, device=args.device, enable_thinking=OOB_ENABLE_THINKING,
+    )
     for npy_path, png_path, true_label in TEST_IMAGES:
         image = Image.open(png_path)
         answer = base_backend.generate({"image": image}, OOB_PROMPT, OOB_MAX_NEW_TOKENS)

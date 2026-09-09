@@ -6,7 +6,9 @@ from __future__ import annotations
 import pandas as pd
 
 from eval.datasets.gz_decals_votes import crossmatch_to_sample
-from eval.runners.score_image_eval import _hard_report, _soft_report
+from eval.runners.score_image_eval import _hard_report, _make_predictor, _soft_report
+
+_predict = _make_predictor("free_text")  # these fixture objects use free-text answers, not digit codes
 
 
 def _objects():
@@ -27,8 +29,8 @@ def _objects():
 
 
 def test_hard_report_scores_both_sides():
-    report_base = _hard_report(_objects(), "base_answer")
-    report_equipped = _hard_report(_objects(), "equipped_answer")
+    report_base = _hard_report(_objects(), "base_answer", _predict)
+    report_equipped = _hard_report(_objects(), "equipped_answer", _predict)
     assert report_equipped["accuracy"] == 1.0  # both equipped answers correctly parse
     assert report_base["accuracy"] == 0.5  # one unparseable -> wrong
 
@@ -46,7 +48,7 @@ def test_soft_report_excludes_unmatched_objects():
     sample_df = pd.DataFrame(_objects())
     crossmatched = crossmatch_to_sample(sample_df, votes, radius_arcsec=1.0)
 
-    report = _soft_report(crossmatched, "equipped_answer")
+    report = _soft_report(crossmatched, "equipped_answer", _predict)
     # object 1 (ra=10.0) crossmatches; object 2 (ra=20.0) doesn't -> excluded
     assert report["n_excluded_no_crossmatch"] == 1
     assert report["n_scored"] <= 1
