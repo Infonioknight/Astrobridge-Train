@@ -138,5 +138,27 @@
     "class_label": "SN II",
     "n_accepted_points": 27,
     "name": "ZTF18AATLFUS"
+  },
+  {
+    "file": "gz10_image_01.npy",
+    "kind": "gz10_image",
+    "Galaxy10_DECals_index": 2942,
+    "ra": 331.941871538144,
+    "dec": 0.3080387435014759,
+    "label_name": "Round Smooth Galaxies",
+    "bands": "g,r,z (griz-minus-i hypothesis, see eval/datasets/image_galaxy10.py)",
+    "rgb_preview": "gz10_image_01.png",
+    "source": "astronolan/galaxy10-aion test split, for eval/prompt_playground.py"
+  },
+  {
+    "file": "gz10_image_02.npy",
+    "kind": "gz10_image",
+    "Galaxy10_DECals_index": 7944,
+    "ra": 325.37992361645786,
+    "dec": 0.4983475846501297,
+    "label_name": "Barred Spiral Galaxies",
+    "bands": "g,r,z (griz-minus-i hypothesis, see eval/datasets/image_galaxy10.py)",
+    "rgb_preview": "gz10_image_02.png",
+    "source": "astronolan/galaxy10-aion test split, for eval/prompt_playground.py"
   }
 ]
