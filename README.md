@@ -6,8 +6,14 @@ steps in order — each one should just work if the one before it did.
 ## 1. Install
 
 ```bash
-uv pip install -e ".[dev]"
+uv sync
 ```
+
+(`pytest`/`pytest-cov` are a `[dependency-groups] dev` entry in `pyproject.toml`, not a
+`[project.optional-dependencies]` extra — a plain `uv sync` installs those by default, no
+`--extra dev` needed. `uv pip install -e ".[dev]"` still works but manages the venv outside
+`uv.lock`'s tracking, which is exactly what silently dropped `modal` from the venv once before —
+prefer `uv sync`.)
 
 (no `uv`? `pip install uv` first, or see https://docs.astral.sh/uv/getting-started/installation/)
 

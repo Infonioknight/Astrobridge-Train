@@ -3,10 +3,13 @@
 # Override on the command line, e.g.: make stage1 ACCELERATE_CONFIG=configs/my_cluster.yaml
 ACCELERATE_CONFIG ?= configs/accelerate_ddp.yaml
 
-.PHONY: test manifest captions cache stage1 eval stage2 install check-access publish infer eval-lightcurve collect-image-labels score-image-eval score-image-eval-debiased
+.PHONY: test manifest captions cache stage1 eval stage2 install check-access publish infer collect-lightcurve-labels score-lightcurve-eval collect-image-labels score-image-eval score-image-eval-debiased
 
+# `uv sync` alone now installs everything (real deps + the "dev" dependency-group) — see
+# pyproject.toml's [dependency-groups] comment for why that's a plain `uv sync` and not
+# `uv sync --extra dev` / `uv pip install -e ".[dev]"`.
 install:
-	uv pip install -e ".[dev]"
+	uv sync
 
 test:
 	pytest -q tests/
@@ -48,13 +51,19 @@ infer:
 		$(if $(SURVEY),--spectrum-survey $(SURVEY)) \
 		$(if $(LIGHTCURVE),--lightcurve-npz $(LIGHTCURVE))
 
-# See eval/README.md — TRACK/BACKEND/LIMIT are optional, defaulting per eval/runners/*.py's own
-# argparse defaults (lightcurve_only / base_only, local, no limit).
-eval-lightcurve:
-	uv run python -m eval.runners.run_lightcurve_eval \
+# Same two-step shape as the image track below — see eval/README.md. Step 1 is the
+# expensive/billed one (N/SEED/TRACK/BACKEND optional, default to collect_lightcurve_labels.py's
+# own argparse defaults); step 2 needs the exact output path step 1 printed.
+collect-lightcurve-labels:
+	uv run python -m eval.runners.collect_lightcurve_labels \
+		$(if $(N),--n $(N)) \
+		$(if $(SEED),--seed $(SEED)) \
 		$(if $(TRACK),--track $(TRACK)) \
-		$(if $(BACKEND),--backend $(BACKEND)) \
-		$(if $(LIMIT),--limit $(LIMIT))
+		$(if $(BACKEND),--backend $(BACKEND))
+
+score-lightcurve-eval:
+	@test -n "$(IN)" || (echo "Usage: make score-lightcurve-eval IN=outputs/eval/raw_generations/yse_lightcurve_only_seed0_nall.json" && exit 1)
+	uv run python -m eval.runners.score_lightcurve_eval --in $(IN)
 
 # Two steps, deliberately not one target — see eval/README.md. Step 1 is the expensive/billed
 # one (N/SEED/BACKEND optional, default to collect_image_labels.py's own argparse defaults);

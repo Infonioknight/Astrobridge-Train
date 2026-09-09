@@ -16,34 +16,40 @@ place "how do I call the model, and where" lives.
 `captioner`, under `src/`, is). Run every script here as a module, from the repo root:
 
 ```bash
-uv run python -m eval.runners.run_lightcurve_eval --track lightcurve_only
+uv run python -m eval.runners.collect_lightcurve_labels --n 90 --seed 0
 uv run python -m eval.runners.run_image_eval --track base_only
 ```
 
-**Not** `uv run python eval/runners/run_lightcurve_eval.py ...` — that fails with
+**Not** `uv run python eval/runners/collect_lightcurve_labels.py ...` — that fails with
 `ModuleNotFoundError: No module named 'eval'`, since running a script directly puts its own
 directory on `sys.path`, not the repo root (`-m` puts the current working directory there
 instead, which is what makes `from eval.backend import ...` resolve).
 
 ## Tracks
 
-### Lightcurve — SN typing (`eval/runners/run_lightcurve_eval.py`)
+### Lightcurve — SN typing, collect + score (`collect_lightcurve_labels.py`, then `score_lightcurve_eval.py`)
 
 Real, held-out benchmark: `BuildNg/astrobridge-yse-test-dataset-v2`, confirmed 266 objects, zero
 `object_id` overlap with the training set. Ground truth: `class_label` ∈ `{SN Ia, SN II, SN Ibc}`
-(confirmed imbalanced: 180/71/15).
+(confirmed imbalanced: 180/71/15). Same two-step, both-models, digit-code shape as the image
+track below (see that section for why the shape is split this way) — the base-model side gets
+`render_lightcurve_plot`'s rendered flux-vs-time PNG instead of raw `atcat_*` arrays (an
+out-of-the-box vision-language model can't consume those directly, same reasoning as the image
+track's `image_rgb` vs `image_bands`), the equipped side gets the raw arrays via
+`build_raw_inputs_lightcurve`.
 
 ```bash
-uv run python -m eval.runners.run_lightcurve_eval --track lightcurve_only
-uv run python -m eval.runners.run_lightcurve_eval --track lightcurve_plus_image
+uv run python -m eval.runners.collect_lightcurve_labels --n 90 --seed 0
+uv run python -m eval.runners.score_lightcurve_eval --in outputs/eval/raw_generations/yse_lightcurve_only_seed0_n90.json
 ```
 
-No base-model comparison for this track — a raw lightcurve array isn't something an
-out-of-the-box vision-language model can consume at all; only the equipped model is scored.
-`lightcurve_plus_image` tests whether adding the host image improves classification over
-`lightcurve_only` alone — genuinely new data-loading code (see `eval/datasets/lightcurve_yse.py`'s
-module docstring for the one real caveat: the host image's band order hasn't been separately
-verified against this specific dataset).
+Omit `--n` to use the entire 266-object eval set (no sampling needed at that size); pass `--n` for
+a quick smoke test first. `--track lightcurve_plus_image` tests whether adding the host image
+improves classification over `lightcurve_only` alone on the equipped side — genuinely new
+data-loading code (see `eval/datasets/lightcurve_yse.py`'s module docstring for the one real
+caveat: the host image's band order hasn't been separately verified against this specific
+dataset); the base side always sees the same rendered lightcurve plot regardless of `--track`,
+since it has no way to consume a second image alongside it.
 
 ### Image — Galaxy Zoo morphology, collect + score (`collect_image_labels.py`, then `score_image_eval.py` and/or `score_image_eval_debiased.py`)
 
@@ -132,13 +138,12 @@ imbalanced enough that a model always guessing the majority class would otherwis
 deceptively good. A model answer that doesn't match any known label counts as wrong, not silently
 dropped (`eval/metrics/caption_to_label.py`).
 
-The lightcurve track's report lands in `outputs/eval/classification/{dataset_slug}_{track}.json`
-(e.g. `outputs/eval/classification/yse_lightcurve_only.json`) — same `outputs/eval/` tree
-`scripts/04_eval.py`'s groundedness report already uses. The image track's collect step lands in
-`outputs/eval/raw_generations/`; `score_image_eval.py` writes `..._scored.json` alongside it
-(hard + group), `score_image_eval_debiased.py` writes `..._debiased_scored.json` (soft) — two
-separate files since the two scoring scripts are meant to be run independently, not always
-together.
+Both tracks' collect step lands in `outputs/eval/raw_generations/` (`yse_<track>_seed<seed>_n<n>.json`
+for lightcurve, `galaxy10_seed<seed>_n<n>.json` for image); scoring writes `..._scored.json`
+alongside it. Image scoring additionally has a separate `score_image_eval_debiased.py` writing
+`..._debiased_scored.json` (soft, see below) — the lightcurve track has no soft-score analog (no
+Galaxy-Zoo-style crowd vote fractions exist for SN typing), so `score_lightcurve_eval.py` is the
+only scoring script for that track.
 
 ### Crowd-vote soft scoring (image track only)
 
@@ -182,8 +187,8 @@ sanity-checked read; the soft score for the actual fine-grained signal.
 
 ## Quick smoke tests before a full/billed run
 
-Lightcurve: every runner flag lives on `run_lightcurve_eval.py`, which takes `--limit N` to
-evaluate only the first N objects. Image: `collect_image_labels.py`'s `--n` already controls the
-total sample size directly — just pass a small `--n` (e.g. `--n 20`) for a quick end-to-end check
-before committing to a full 150+ run, especially on `--backend modal` where every collect run is
+Both tracks' collect scripts take `--n` directly (lightcurve: `collect_lightcurve_labels.py`,
+omit for the full 266-object set, min-feasible bounded by SN Ibc's 15 real objects; image:
+`collect_image_labels.py`) — pass a small `--n` (e.g. `--n 20`) for a quick end-to-end check
+before committing to a full run, especially on `--backend modal` where every collect run is
 billed.

@@ -37,9 +37,25 @@ dependencies = [
                           # — see src/captioner/encoders/aion_common.py. No version pinned here;
                           # confirm against https://huggingface.co/polymathic-ai/aion-base's
                           # install instructions if a specific version turns out to matter.
+    "modal>=1.5",   # eval/backend.py's Modal (--backend modal) path — `import modal` is
+                     # unconditional at that module's top level, so it's needed even to import
+                     # eval.backend for local-only use, not just when actually deploying/running
+                     # on Modal. Was previously installed into the venv by hand, outside uv's
+                     # tracking entirely (confirmed real: absent from every past pyproject.toml/
+                     # uv.lock in git history) — `uv sync` then silently pruned it on the next
+                     # sync since it wasn't in the lockfile. Declaring it here is the actual fix,
+                     # not a version pin for its own sake.
+    "matplotlib>=3.8",   # eval/datasets/lightcurve_yse.py's render_lightcurve_plot — renders a
+                          # flux-vs-time PNG from raw atcat_* photometry so the base model's
+                          # native-vision pathway has something to consume, mirroring the image
+                          # track's image_rgb (no other module needs a plotting library).
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
+# A PEP 735 dependency-group, not `[project.optional-dependencies]`, deliberately: uv installs a
+# group literally named "dev" by default on a bare `uv sync` (no `--extra dev` needed), whereas
+# an optional-dependencies "extra" is skipped by `uv sync` unless explicitly requested — the
+# actual bug that made a plain `uv sync` silently strip pytest out of the venv.
 dev = ["pytest>=8.0", "pytest-cov"]
 
 [tool.setuptools.packages.find]
