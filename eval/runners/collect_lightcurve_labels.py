@@ -41,6 +41,7 @@ from captioner.utils.config import load_config, remaining_argv
 from captioner.utils.logging import get_logger
 from eval.backend import free_local_backend, get_backend
 from eval.datasets.lightcurve_yse import (
+    DEFAULT_FREETEXT_BASE_MAX_NEW_TOKENS,
     DEFAULT_FREETEXT_MAX_NEW_TOKENS,
     SN_CLASS_CODE_PROMPT,
     SN_CLASS_CODES,
@@ -81,7 +82,7 @@ def main() -> None:
              "SN_FREETEXT_PROMPT's comment in eval/datasets/lightcurve_yse.py).",
     )
     parser.add_argument("--question", default=None, help="defaults to SN_FREETEXT_PROMPT, or SN_CLASS_CODE_PROMPT under --answer-format digit_code")
-    parser.add_argument("--base-max-new-tokens", type=int, default=None, help=f"defaults to {DEFAULT_FREETEXT_MAX_NEW_TOKENS} (verbose_class) or {DEFAULT_BASE_MAX_NEW_TOKENS} (digit_code)")
+    parser.add_argument("--base-max-new-tokens", type=int, default=None, help=f"defaults to {DEFAULT_FREETEXT_BASE_MAX_NEW_TOKENS} (verbose_class) or {DEFAULT_BASE_MAX_NEW_TOKENS} (digit_code)")
     parser.add_argument("--equipped-max-new-tokens", type=int, default=None, help=f"defaults to {DEFAULT_FREETEXT_MAX_NEW_TOKENS} (verbose_class) or {DEFAULT_EQUIPPED_MAX_NEW_TOKENS} (digit_code)")
     parser.add_argument(
         "--base-enable-thinking", action="store_true", default=False,
@@ -97,7 +98,7 @@ def main() -> None:
         SN_FREETEXT_PROMPT if verbose_mode else SN_CLASS_CODE_PROMPT
     )
     base_max_new_tokens = args.base_max_new_tokens if args.base_max_new_tokens is not None else (
-        DEFAULT_FREETEXT_MAX_NEW_TOKENS if verbose_mode else DEFAULT_BASE_MAX_NEW_TOKENS
+        DEFAULT_FREETEXT_BASE_MAX_NEW_TOKENS if verbose_mode else DEFAULT_BASE_MAX_NEW_TOKENS
     )
     equipped_max_new_tokens = args.equipped_max_new_tokens if args.equipped_max_new_tokens is not None else (
         DEFAULT_FREETEXT_MAX_NEW_TOKENS if verbose_mode else DEFAULT_EQUIPPED_MAX_NEW_TOKENS

@@ -106,10 +106,15 @@ SN_FREETEXT_PROMPT = (
     "FINAL ANSWER: <class>"
 )
 
-# Deliberately generous, and the same for both sides — the whole point of this path is tolerating
-# a verbose answer that happens to contain a class, rather than forcing a 1-token reply. The
-# digit-code path's tight asymmetric budgets (40/8) existed only to constrain digit emission.
+# Base needs materially more room than equipped: confirmed live (n=30) that at 250 tokens the base
+# model writes a full multi-section analysis and is cut off BEFORE the "FINAL ANSWER:" line on
+# ~28/30 objects — a truncation artifact, not a refusal or a classification failure. Equipped is
+# far terser (its trained caption voice reaches the verdict in ~150 tokens) so 250 is plenty there.
+# The whole point of this path is tolerating a verbose answer that happens to contain a class,
+# rather than forcing a 1-token reply — the digit-code path's tight asymmetric budgets (40/8)
+# existed only to constrain digit emission and have no reason to apply here.
 DEFAULT_FREETEXT_MAX_NEW_TOKENS = 250
+DEFAULT_FREETEXT_BASE_MAX_NEW_TOKENS = 500
 
 # 1=g, 2=r per captioner.data.transients_dataset's module docstring (`atcat_band_id`); 0 is the
 # excluded-i sentinel, always masked out by `atcat_use` below before it's ever plotted.
