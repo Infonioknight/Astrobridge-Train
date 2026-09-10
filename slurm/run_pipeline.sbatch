@@ -57,10 +57,12 @@ PROJECT_DIR="${PROJECT_DIR:-/u/li26/ondemand/data/sys/dashboard/batch_connect/sy
 VENV_DIR="${VENV_DIR:-$PROJECT_DIR/.venv}"
 PYTHON_MODULE="${PYTHON_MODULE:-python/3.11.9}"
 
-# Model/dataset downloads land here. Defaults to the normal HF cache under $HOME;
-# point it at /work/hdd/bfvh/$USER/hf-cache if /u fills up. Note this moves only
-# the *cache* — your HF token stays in $HF_HOME, so auth keeps working.
-# export HF_HUB_CACHE="/work/hdd/bfvh/$USER/hf-cache"
+# Model/dataset downloads land here, NOT on /u. This is load-bearing, not tidiness: /u/$USER has
+# a 103G hard quota with ~35G free, while Qwen3.5-9B (~18G) and gemma-4-12B (~24G) together need
+# ~42G — running both branches' jobs against the $HOME cache would hit the quota mid-download.
+# /work/hdd/bfvh has ~800G free. Only the *cache* moves; the HF token stays in $HF_HOME, so auth
+# keeps working. Already seeded with the datasets + AION, so nothing re-downloads unnecessarily.
+export HF_HUB_CACHE="${HF_HUB_CACHE:-/work/hdd/bfvh/$USER/hf-cache}"
 
 # =============================================================================
 #  Environment
