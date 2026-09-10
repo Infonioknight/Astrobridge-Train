@@ -12,14 +12,12 @@ import json
 from omegaconf import DictConfig, OmegaConf
 
 from captioner.encoders.aion_image import AionImageEncoder
-from captioner.encoders.aion_spectrum import AionSpectrumEncoder
-from captioner.encoders.atcat_lightcurve import AtcatLightcurveEncoder
 from captioner.encoders.base import ModalityEncoder, assert_out_dim
 
+# IMAGE-ONLY BRANCH (train-v2-images): aion_spectrum / atcat_lightcurve wrappers were removed
+# with their modalities. Re-add the import + the registry entry to bring one back.
 IMPL_REGISTRY: dict[str, type] = {
     "aion_image": AionImageEncoder,
-    "aion_spectrum": AionSpectrumEncoder,
-    "atcat_lightcurve": AtcatLightcurveEncoder,
 }
 
 

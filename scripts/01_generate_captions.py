@@ -1,33 +1,12 @@
 #!/usr/bin/env python
-"""Decomposes literature-derived text into per-tier captions and runs the leakage-validation
-CI gate (§4, §9 step 3). Gate: zero leakage violations, plus claim-survival rate reported, plus
-a sample written out for the required manual read of 50 captions spanning both tiers.
+"""Image-only branch (train-v2-images): one caption per image object from
+`gapatron/astrobridge-image-captions`' `caption_fused` field, plus the leakage-validation gate.
 
-Three caption sources, kept deliberately separate:
-  - spectra: a teammate-produced, spectrum-grounded LLM caption set (Gemini —
-    UniverseTBD/AstroBridge-Data's captions/spectra/*.jsonl, see data/spectra_dataset.py:
-    load_gemini_spectra_captions). Covers a subset of objects (2,021 as of the configured
-    filename, v2). Deliberate scope choice: spectra-tier captions are restricted to ONLY this set
-    for now — objects with spectra but no Gemini caption get no spectra-tier caption at all,
-    same asymmetry the image side already has (not every has_image object has a caption_fused
-    match either). No fallback to mention_summary decomposition for the rest.
-  - image: gapatron's `caption_fused` field (gapatron/astrobridge-image-captions, see
-    data/image_dataset.py) — same reasoning as spectra above: pre-vetted, modality-restricted,
-    preferred over decomposing text ourselves.
-  - lightcurve: the transients dataset's own `transient_caption`, used RAW (no keyword veto).
-    Earlier revisions ran it through decompose_object's lightcurve-scoped filter to drop
-    designations/redshifts/spectroscopic-type sentences; that filter was removed deliberately
-    (RETRAIN_SKETCH.md B3 / the LC researcher's suggestion) so the model does see the explicit
-    (lightcurve -> SN type) signal — accepting that this reintroduces some ungrounded assertions.
-  - relational/joint claims (dormant — milestone 1 doesn't train on the joint tier, see
-    configs/modalities.yaml's dropout weights): still decomposed from AstroBridge-Data's
-    `mention_summary` via decompose_object, since Gemini's spectra captions and gapatron's image
-    captions are both single-modality-only and can't produce a claim that needs both together.
-    Pure single-modality claims from this decomposition are always dropped in favor of the two
-    pre-vetted sources above — decompose_object's only live output now is relational claims, so
-    `claim_survival_rate` in the report below is really measuring "how much of mention_summary
-    produces joint claims," not overall claim survival — a low number here is expected, not a
-    sign of something broken.
+With a single modality there is no joint tier and no cross-modal decomposition — the
+`mention_summary`/Gemini/transient caption sources and `decompose_object` are all gone with
+their datasets. `caption_fused` is a pre-vetted, image-grounded caption (Gemini's merge of a
+blind pass, a properties pass, and a literature pass, with the dataset's own leak detection),
+used directly.
 """
 from __future__ import annotations
 
@@ -38,17 +17,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from captioner.data.captions import (
-    Caption,
-    Claim,
-    compose_captions,
-    decompose_object,
-    claim_survival_rate,
-    _split_sentences,
-)
+from captioner.data.captions import Caption, Claim, compose_captions
 from captioner.data.image_dataset import load_image_captions_table
-from captioner.data.spectra_dataset import load_gemini_spectra_captions, load_spectra_table
-from captioner.data.transients_dataset import load_transient_captions
 from captioner.eval.claims import claim_kind_histogram, validate_all
 from captioner.utils.config import load_config
 from captioner.utils.logging import get_logger
@@ -60,200 +30,58 @@ def main() -> None:
     cfg = load_config("base", "data")
     manifest = pd.read_parquet(cfg.manifest.parquet)
 
-    # AstroBridge-Data carries the literature-derived fields directly.
-    spectra_ds = load_spectra_table(
-        cfg.sources.spectra.hf_path,
-        revision=cfg.sources.spectra.get("revision"),
-        files=list(cfg.sources.spectra.get("files") or []) or None,
-    )
-    text_by_object = spectra_ds.set_index("object_id")[
-        ["mention_summary", "evidence_quotes", "arxiv_id"]
-    ].to_dict(orient="index")
-
-    # Gemini spectra captions are keyed by wiki_entity_id, not our canonical object_id — build
-    # the mapping from the same spectra_ds row (both columns confirmed present on AstroBridge-Data).
-    wiki_to_object_id = spectra_ds.dropna(subset=["wiki_entity_id"]).set_index("wiki_entity_id")["object_id"].to_dict()
-    gemini_captions_df = load_gemini_spectra_captions(
-        cfg.sources.spectra_captions.hf_path,
-        cfg.sources.spectra_captions.filename,
-        revision=cfg.sources.spectra_captions.get("revision"),
-    )
-    n_gemini_unmatched_wiki_id = 0
-    spectra_gemini_caption_by_object: dict[str, str] = {}
-    for _, grow in gemini_captions_df.iterrows():
-        oid = wiki_to_object_id.get(grow["wiki_entity_id"])
-        if oid is None:
-            n_gemini_unmatched_wiki_id += 1
-            continue
-        spectra_gemini_caption_by_object[oid] = grow["caption"]
-
     image_captions_df = load_image_captions_table(
         cfg.sources.image_captions.hf_path, revision=cfg.sources.image_captions.get("revision")
     )
     image_caption_by_object = image_captions_df.set_index("object_id")["caption"].to_dict()
 
-    # Transients ship their own caption, used RAW here (no keyword veto — see module docstring
-    # and RETRAIN_SKETCH.md B3). It is not pre-vetted like caption_fused / the Gemini captions,
-    # and it does assert spectroscopic type / redshift / designation — kept on purpose now.
-    transient_caption_by_object: dict[str, str] = {}
-    if "transients" in cfg.sources:
-        transient_captions_df = load_transient_captions(
-            cfg.sources.transients.hf_path, revision=cfg.sources.transients.get("revision")
-        )
-        transient_caption_by_object = (
-            transient_captions_df.set_index("object_id")["transient_caption"].to_dict()
-        )
-
     all_captions: list[Caption] = []
-    n_source_sentences = 0
-    n_surviving = 0
-    n_image_from_gapatron = 0
     n_image_available = 0
-    n_spectra_from_gemini = 0
-    n_spectra_available = 0
-    n_lightcurve_available = 0
-    n_lightcurve_kept = 0
-    n_no_usable_text = 0
-    class_label_by_object: dict[str, str] = {}
+    n_image_matched = 0
 
     for _, row in manifest.iterrows():
         object_id = row["object_id"]
-        # Derived from the manifest's own has_<modality> columns rather than a hardcoded tuple, so
-        # adding a modality needs no change here.
-        available = frozenset(
-            c[len("has_") :] for c in manifest.columns if c.startswith("has_") and bool(row[c])
-        )
-        if not available:
+        if not bool(row.get("has_image", False)):
             continue
+        n_image_available += 1
 
-        text_row = text_by_object.get(object_id)
-        claims: list[Claim] = []
-
-        if text_row is not None:
-            claims = decompose_object(
-                object_id=object_id,
-                mention_summary=text_row.get("mention_summary") or "",
-                evidence_quotes=text_row.get("evidence_quotes"),
-                arxiv_id=text_row.get("arxiv_id"),
-                available_modalities=available,
-                generator=cfg.captions.generator,
-            )
-            n_source_sentences += len(_split_sentences(text_row.get("mention_summary") or ""))
-            n_surviving += len(claims)
-
-            # Pure single-modality claims are always dropped in favor of the pre-vetted sources
-            # below (Gemini for spectra, caption_fused for image) — only relational/joint claims
-            # from this decomposition are ever used. See module docstring.
-            claims = [c for c in claims if len(c.supporting) > 1]
-
-        if "image" in available:
-            # manifest's canonical object_id is AstroBridge-Data's id (from
-            # target_object_id_target); the caption parquet is keyed by the Legacy Survey's
-            # own naming (object_id_legacy) — different namespace, so look up by that instead.
-            n_image_available += 1
-            image_lookup_id = row.get("object_id_legacy") or object_id
-            fused = image_caption_by_object.get(image_lookup_id)
-            if fused:
-                claims.append(
-                    Claim(
-                        text=fused,
-                        supporting=frozenset({"image"}),
-                        kind="observation",
-                        provenance=f"gapatron:{object_id}",
-                    )
-                )
-                n_image_from_gapatron += 1
-
-        if "spectra" in available:
-            n_spectra_available += 1
-            gemini_caption = spectra_gemini_caption_by_object.get(object_id)
-            if gemini_caption:
-                claims.append(
-                    Claim(
-                        text=gemini_caption,
-                        supporting=frozenset({"spectra"}),
-                        kind="observation",
-                        provenance=f"gemini:{object_id}",
-                    )
-                )
-                n_spectra_from_gemini += 1
-
-        if "lightcurve" in available:
-            n_lightcurve_available += 1
-            raw_caption = transient_caption_by_object.get(object_id)
-            if raw_caption:
-                # Used raw, same as image/spectra above — NO keyword veto. The transient caption
-                # asserts spectroscopic type / redshift / designation; we now keep that on
-                # purpose (RETRAIN_SKETCH.md B3). See scripts docstring.
-                claims.append(
-                    Claim(
-                        text=raw_caption,
-                        supporting=frozenset({"lightcurve"}),
-                        kind="observation",
-                        provenance=f"transient_lc:{object_id}",
-                    )
-                )
-                n_lightcurve_kept += 1
-
-        if "class_label" in row and not pd.isna(row.get("class_label")):
-            class_label_by_object[object_id] = row["class_label"]
-
-        if not claims:
-            n_no_usable_text += 1
+        # manifest's canonical object_id is AstroBridge-Data's id (target_object_id_target); the
+        # caption parquet is keyed by the Legacy Survey's own naming (object_id_legacy).
+        image_lookup_id = row.get("object_id_legacy") or object_id
+        fused = image_caption_by_object.get(image_lookup_id)
+        if not fused:
             continue
+        n_image_matched += 1
 
-        captions = compose_captions(object_id, claims, available)
-        all_captions.extend(captions)
-
-    if n_lightcurve_available:
-        logger.info(
-            f"Lightcurve tier: kept {n_lightcurve_kept}/{n_lightcurve_available} transient "
-            "captions RAW (no keyword veto). These assert spectroscopic type / redshift / "
-            "designation — read outputs/captions/manual_review_sample.jsonl before training."
+        claim = Claim(
+            text=fused,
+            supporting=frozenset({"image"}),
+            kind="observation",
+            provenance=f"gapatron:{object_id}",
         )
+        all_captions.extend(compose_captions(object_id, [claim], frozenset({"image"})))
 
     violations = validate_all(all_captions)
-    survival_rate = claim_survival_rate(n_source_sentences, n_surviving)
     kind_hist = claim_kind_histogram(all_captions)
 
-    image_caption_match_rate = n_image_from_gapatron / n_image_available if n_image_available else None
-    if image_caption_match_rate is not None and image_caption_match_rate < 0.5:
+    match_rate = n_image_matched / n_image_available if n_image_available else None
+    if match_rate is not None and match_rate < 0.5:
         logger.warning(
-            f"Only {image_caption_match_rate:.1%} of image-available objects "
-            f"({n_image_from_gapatron}/{n_image_available}) found a caption_fused match. This is "
-            "the untested assumption that legacy_south_all_images.parquet's object_id_legacy "
-            "shares an id namespace with gapatron/astrobridge-image-captions' own object_id "
-            "column — it may not hold. Check a few manifest rows' object_id_legacy against "
-            "*_captions.json filenames before trusting image-tier caption coverage."
-        )
-
-    spectra_caption_match_rate = n_spectra_from_gemini / n_spectra_available if n_spectra_available else None
-    if n_gemini_unmatched_wiki_id > 0:
-        logger.warning(
-            f"{n_gemini_unmatched_wiki_id}/{len(gemini_captions_df)} Gemini captions' "
-            "wiki_entity_id had no match in AstroBridge-Data's wiki_entity_id column — those "
-            "captions were dropped rather than silently misattributed. If this is a large "
-            "fraction, the id namespace assumption may not hold as cleanly as the spot-check "
-            "suggested; worth a closer look."
+            f"Only {match_rate:.1%} of image objects ({n_image_matched}/{n_image_available}) "
+            "matched a caption_fused row. This is the untested assumption that "
+            "legacy_south_all_images.parquet's object_id_legacy shares an id namespace with "
+            "gapatron/astrobridge-image-captions' object_id column — verify before trusting "
+            "caption coverage."
         )
 
     report = {
         "n_objects_processed": len({c.object_id for c in all_captions}),
         "n_captions": len(all_captions),
         "n_leakage_violations": len(violations),
-        "claim_survival_rate": survival_rate,
         "claim_kind_histogram": kind_hist,
-        "n_image_captions_from_gapatron_fused": n_image_from_gapatron,
         "n_image_available": n_image_available,
-        "image_caption_match_rate": image_caption_match_rate,
-        "n_spectra_captions_from_gemini": n_spectra_from_gemini,
-        "n_spectra_available": n_spectra_available,
-        "spectra_caption_match_rate": spectra_caption_match_rate,
-        "n_gemini_captions_total": len(gemini_captions_df),
-        "n_gemini_unmatched_wiki_id": n_gemini_unmatched_wiki_id,
-        "n_lightcurve_available": n_lightcurve_available,
-        "n_lightcurve_captions_kept": n_lightcurve_kept,
-        "n_objects_with_no_usable_text": n_no_usable_text,
+        "n_image_captions_matched": n_image_matched,
+        "image_caption_match_rate": match_rate,
         "generator": cfg.captions.generator,
     }
 
@@ -269,8 +97,6 @@ def main() -> None:
                 "n_claims": len(c.claims),
                 "source": c.source,
                 "generator": c.generator,
-                # Structured metadata for eval slicing only — never concatenated into caption text.
-                "class_label": class_label_by_object.get(c.object_id),
             }
             for c in all_captions
         ]
@@ -278,11 +104,9 @@ def main() -> None:
     captions_df.to_parquet(cfg.captions.parquet, index=False)
     Path(cfg.captions.report).write_text(json.dumps(report, indent=2))
 
-    # Sample 50 captions spanning both tiers for the required manual read (§9 step 3 gate).
+    # Sample 50 captions for the required manual read (§9 step 3 gate).
     rng = random.Random(0)
-    single = [c for c in all_captions if len(c.subset) == 1]
-    joint = [c for c in all_captions if len(c.subset) > 1]
-    sample = rng.sample(single, min(25, len(single))) + rng.sample(joint, min(25, len(joint)))
+    sample = rng.sample(all_captions, min(50, len(all_captions)))
     sample_path = out_dir / "manual_review_sample.jsonl"
     with open(sample_path, "w") as f:
         for c in sample:

@@ -1,53 +1,35 @@
 # Data sources, join, split, and caption-decomposition config.
 # No object/join counts are hardcoded here (see 05_build_spec_image_spectra.md §1) —
 # only warning thresholds, which are config, not spec constants.
+#
+# IMAGE-ONLY BRANCH (train-v2-images): only the `image` + `image_captions` sources are
+# configured. The spectra / spectra_captions / transients blocks are intentionally absent —
+# manifest.py and scripts/01_generate_captions.py treat all three as OPTIONAL (the same `if
+# "<name>" in cfg.sources` guard the transients tier always had), so removing them from config
+# is all it takes. The spectra/lightcurve encoder + loader modules still exist and are still
+# unit-tested; they're just unused here.
 
 sources:
-  spectra:
-    hf_path: UniverseTBD/AstroBridge-Data
-    revision: null   # not loaded via `datasets.load_dataset` — see data/spectra_dataset.py.
-                      # No `split` here: the repo's multiple parquet files are read directly.
-    files:
-      - observations/spectra/desi_sdss_subset_crossmatch_nolan_1.0arcsec.parquet
   image:
-    # PIXEL/FLUX source only now — `legacy_south_all_images.parquet` (real calibrated per-band
-    # flux for AION). Captions moved to their own repo below.
+    # PIXEL/FLUX source — `legacy_south_all_images.parquet` (real calibrated per-band flux for
+    # AION). Captions come from their own repo below.
     hf_path: gapatron/legacy_survey_south_images_captions
     revision: null   # not a `datasets.load_dataset`-shaped repo — see data/image_dataset.py.
   image_captions:
     # `caption_fused` — Gemini's merged blind+properties+literature caption, one row per object
-    # in parquet shards. Was gapatron/legacy_survey_south_images_captions' per-object
-    # *_captions.json (`caption_blind`); this repo is the same author's superset. Keyed by
-    # object_id in the Legacy Survey namespace (matched via object_id_legacy, same as before).
+    # in parquet shards. Keyed by object_id in the Legacy Survey namespace (matched via
+    # object_id_legacy).
     hf_path: gapatron/astrobridge-image-captions
     revision: null
-  spectra_captions:
-    # Teammate-produced, spectrum-grounded LLM captions (Gemini) — the spectra-tier equivalent
-    # of gapatron's caption_blind for images. Spectra-tier captions are restricted to just the
-    # objects this file covers (see scripts/01_generate_captions.py) rather than falling back to
-    # mention_summary decomposition for the rest — a deliberate scope choice, not a limitation
-    # of the loader. v2: now hosted directly in AstroBridge-Data rather than a separate personal
-    # repo — confirmed live: 2,021 usable captions (up from 1,223 in v1), object_key format
-    # (gmw_XXXXXXXX) still matches the spectra table's wiki_entity_id column.
-    hf_path: UniverseTBD/AstroBridge-Data
-    filename: captions/spectra/desi_sdss_combined_v2_gemini-3_7-flash.jsonl
-    revision: null
-  transients:
-    # 987 ZTF BTS supernovae with accepted alert photometry — the only source of time-domain data.
-    # Its `object_id` is a ZTF designation, a namespace shared with nothing else here, so these
-    # objects are APPENDED to the manifest as new rows rather than joined (see data/manifest.py).
-    # The host-image columns (`image_flux`, `display_image`, `host_image_caption`) are debugging
-    # artifacts and are deliberately never read — transients contribute the lightcurve tier only.
-    hf_path: BuildNg/astrobridge-transients-dataset
-    revision: null   # not loaded via `datasets.load_dataset` — see data/transients_dataset.py
 
 join:
   key: _healpix_29
-  fallback_radius_arcsec: 1.0   # coordinate crossmatch radius when `key` isn't in both tables
+  fallback_radius_arcsec: 1.0   # unused image-only (no second table to join), kept for schema stability
 
 splits:
-  # train is implicit (everything not assigned to val/test). val/test are drawn according to
-  # `policy` below, and unpaired objects always go to train — see manifest.py.
+  # Image-only: no upstream `split` column exists in either image source, so val/test are drawn
+  # entirely by the seeded stratified draw below. `honor_upstream` is harmless (there's nothing
+  # to honour).
   honor_upstream: true
   policy: stratified
   # stratified | joint_only | auto.

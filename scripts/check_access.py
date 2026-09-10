@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Checks HF access to everything this pipeline needs — two datasets (one of them gated, with a
-specific file this build depends on) and two gated-or-not models — before you sink real time
-into `make manifest`/`make cache`/`make stage1`. Metadata-only calls, no downloads.
+"""Checks HF access to everything this IMAGE-ONLY pipeline needs — the image flux repo, the
+image caption repo, the AION model, and the LLM — before you sink real time into
+`make manifest`/`make cache`/`make stage1`. Metadata-only calls, no downloads.
 
 Run this first on any machine/account that hasn't used this project before: `make check-access`.
 """
@@ -33,11 +33,6 @@ def main() -> None:
     api = HfApi()
     results = {}
 
-    results["spectra dataset"] = _check(
-        f"dataset access: {cfg.sources.spectra.hf_path}",
-        lambda: api.dataset_info(cfg.sources.spectra.hf_path),
-    )
-
     results["image dataset (repo)"] = _check(
         f"dataset access: {cfg.sources.image.hf_path}",
         lambda: api.dataset_info(cfg.sources.image.hf_path),
@@ -67,29 +62,7 @@ def main() -> None:
         _check_image_files,
     )
 
-    if "transients" in cfg.sources:
-        results["transients dataset"] = _check(
-            f"dataset access: {cfg.sources.transients.hf_path}",
-            lambda: api.dataset_info(cfg.sources.transients.hf_path),
-        )
-
-    if "lightcurve" in cfg.modalities:
-        lc_encoder = cfg.modalities.lightcurve.encoder
-        onnx_file = lc_encoder.get("kwargs", {}).get("onnx_file", "atcat_f32.onnx")
-
-        def _check_atcat():
-            files = api.list_repo_files(lc_encoder.hf_path)
-            if onnx_file not in files:
-                raise FileNotFoundError(
-                    f"{onnx_file} not found in {lc_encoder.hf_path} — the lightcurve encoder "
-                    "depends on this exact filename; check configs/modalities.yaml."
-                )
-
-        results["ATCAT model"] = _check(
-            f"model access: {lc_encoder.hf_path} ({onnx_file})", _check_atcat
-        )
-
-    aion_path = cfg.modalities.image.encoder.hf_path  # same repo for both modalities today
+    aion_path = cfg.modalities.image.encoder.hf_path
     results["AION model"] = _check(
         f"model access: {aion_path}",
         lambda: api.model_info(aion_path),

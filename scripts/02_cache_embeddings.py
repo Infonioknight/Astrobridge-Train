@@ -2,11 +2,9 @@
 """Loads encoders exactly once, encodes every object that has that modality, and writes
 float16 shards + an index parquet (§5). Training never imports this module's encoders.
 
-Both field schemas are confirmed against real data: spectra via AstroBridge-Data's `spectrum`
-struct (`flux`/`ivar`/`lambda`/`mask`), image via `legacy_south_all_images.parquet`'s
-`image_legacy` (list of per-band `{band, flux, mask, ivar, psf_fwhm, scale}` structs), and light
-curves via BuildNg/astrobridge-transients-dataset's `atcat_*` arrays — see data/image_dataset.py,
-data/transients_dataset.py and the three batch loaders below.
+IMAGE-ONLY BRANCH: image via `legacy_south_all_images.parquet`'s `image_legacy` (list of
+per-band `{band, flux, mask, ivar, psf_fwhm, scale}` structs) — see data/image_dataset.py and
+the batch loader below.
 """
 from __future__ import annotations
 
@@ -18,99 +16,11 @@ import torch
 from pathlib import Path
 
 from captioner.data.cache import cache_modality, verify_fp16_roundtrip
-from captioner.data.transients_dataset import prepare_lightcurve_arrays
 from captioner.encoders.registry import build_encoder
 from captioner.utils.config import load_config, remaining_argv
 from captioner.utils.logging import get_logger
 
 logger = get_logger(__name__)
-
-
-def _spectra_batch_loader(raw_by_id: dict):
-    """AstroBridge-Data's `spectrum` field (confirmed via the HF datasets-server schema for
-    UniverseTBD/AstroBridge-Data) is a nested struct of five float32/bool lists:
-    `flux`, `ivar`, `lsf_sigma`, `lambda` (wavelength, in angstroms), `mask`. AION's
-    DESISpectrum/SDSSSpectrum codecs want `flux`/`ivar`/`mask`/`wavelength`; `lambda` is the
-    wavelength grid — `lsf_sigma` is unused (not part of either modality class's constructor).
-    `survey` (attached by data/spectra_dataset.py's `_attach_survey_column`) routes each object
-    to the matching modality class in aion_spectrum.py — see that file's docstring for why the
-    distinction between DESI-origin and SDSS-origin spectra is a real, non-optional requirement.
-    """
-
-    def _load(object_ids: list[str]) -> dict[str, torch.Tensor]:
-        rows = [raw_by_id[oid] for oid in object_ids]
-        spectra = [r["spectrum"] for r in rows]
-        fluxes = [np.asarray(s["flux"], dtype=np.float32) for s in spectra]
-        max_len = max(len(f) for f in fluxes)
-
-        flux_tensor = torch.zeros((len(fluxes), max_len), dtype=torch.float32)
-        wave_tensor = torch.zeros((len(fluxes), max_len), dtype=torch.float32)
-        ivar_tensor = torch.ones((len(fluxes), max_len), dtype=torch.float32)
-        mask_tensor = torch.zeros((len(fluxes), max_len), dtype=torch.bool)
-
-        for i, s in enumerate(spectra):
-            n = len(fluxes[i])
-            flux_tensor[i, :n] = torch.from_numpy(fluxes[i])
-            wave_tensor[i, :n] = torch.from_numpy(np.asarray(s["lambda"], dtype=np.float32))
-            ivar_tensor[i, :n] = torch.from_numpy(np.asarray(s["ivar"], dtype=np.float32))
-            mask_tensor[i, :n] = torch.from_numpy(np.asarray(s["mask"], dtype=bool))
-
-        survey = [r["survey"] for r in rows]
-
-        return {
-            "flux": flux_tensor,
-            "wavelength": wave_tensor,
-            "ivar": ivar_tensor,
-            "mask": mask_tensor,
-            "survey": survey,
-        }
-
-    return _load
-
-
-def _lightcurve_batch_loader(raw_by_id: dict, modality_cfg):
-    """Builds ATCAT's five fixed-length inputs from the transients table.
-
-    All the selection logic — accepted-point masking, detection-window trimming, seeded
-    downsampling, padding to ATCAT's static 243 — lives in data/transients_dataset.py's
-    `prepare_lightcurve_arrays`, kept numpy-only so it is testable without a GPU stack. This
-    closure only stacks per-object arrays into a batch and reports what was downsampled.
-    """
-    kwargs = modality_cfg.encoder.get("kwargs", {})
-    seq_len = int(modality_cfg.max_tokens)
-    window_days = float(kwargs.get("detection_window_days", 30.0))
-    detection_snr = float(kwargs.get("detection_snr", 5.0))
-    seed = int(kwargs.get("subsample_seed", 0))
-
-    def _load(object_ids: list[str]) -> dict[str, torch.Tensor]:
-        stacked: dict[str, list] = {k: [] for k in ("flux", "flux_err", "time", "mask", "channel_index")}
-        for oid in object_ids:
-            row = raw_by_id[oid]
-            arrays, info = prepare_lightcurve_arrays(
-                row["lc_mjd"],
-                row["atcat_flux"],
-                row["atcat_flux_error"],
-                row["atcat_band_id"],
-                row["atcat_use"],
-                object_id=oid,
-                seq_len=seq_len,
-                detection_window_days=window_days,
-                detection_snr=detection_snr,
-                seed=seed,
-            )
-            if info["downsampled"]:
-                logger.warning(
-                    f"[lightcurve] {oid}: {info['n_in_window']} accepted points inside the "
-                    f"detection window exceeds ATCAT's fixed sequence length {seq_len}; kept "
-                    f"{info['n_selected']} chosen uniformly at random "
-                    f"({info['n_selected'] / info['n_in_window']:.0%} of them, seeded per object "
-                    "so re-runs are identical)."
-                )
-            for key, value in arrays.items():
-                stacked[key].append(value)
-        return {k: torch.from_numpy(np.stack(v, axis=0)) for k, v in stacked.items()}
-
-    return _load
 
 
 def _flux_to_array(raw_flux, object_id: str, band: str) -> np.ndarray:
@@ -226,26 +136,6 @@ def main() -> None:
 
     modality_names = [args.modality] if args.modality else list(cfg.modalities.keys())
 
-    spectra_by_id = None
-    if "spectra" in modality_names:
-        from captioner.data.spectra_dataset import load_spectra_table
-
-        spectra_df = load_spectra_table(
-            cfg.sources.spectra.hf_path,
-            revision=cfg.sources.spectra.get("revision"),
-            files=list(cfg.sources.spectra.get("files") or []) or None,
-        )
-        spectra_by_id = spectra_df.set_index("object_id").to_dict(orient="index")
-
-    transients_by_id = None
-    if "lightcurve" in modality_names:
-        from captioner.data.transients_dataset import load_transients_table
-
-        transients_df = load_transients_table(
-            cfg.sources.transients.hf_path, revision=cfg.sources.transients.get("revision")
-        )
-        transients_by_id = transients_df.set_index("object_id").to_dict(orient="index")
-
     image_pixels_by_id = None
     if "image" in modality_names:
         from captioner.data.image_dataset import load_image_flux_pixels
@@ -262,16 +152,11 @@ def main() -> None:
         modality_cfg = cfg.modalities[name]
         encoder = build_encoder(name, modality_cfg, device=args.device)
 
-        if name == "spectra":
-            loader = _spectra_batch_loader(spectra_by_id)
-        elif name == "image":
+        if name == "image":
             loader = _image_batch_loader(image_pixels_by_id, list(modality_cfg.encoder.kwargs.get("bands", [])))
-        elif name == "lightcurve":
-            loader = _lightcurve_batch_loader(transients_by_id, modality_cfg)
         else:
             raise NotImplementedError(
-                f"No batch loader wired for modality {name!r} yet — add one here when the "
-                f"modality is added to configs/modalities.yaml (impl={modality_cfg.encoder.impl})."
+                f"Image-only branch: no batch loader for modality {name!r} (impl={modality_cfg.encoder.impl})."
             )
 
         sample_ids = manifest.loc[manifest[f"has_{name}"], "object_id"].head(min(50, len(manifest))).tolist()
@@ -291,11 +176,7 @@ def main() -> None:
             excluded_mask = manifest["object_id"].isin(excluded_ids)
             manifest.loc[excluded_mask, flag_col] = False
             if "tier" in manifest.columns:
-                # Mirrors data/manifest.py's rule — joint iff more than one modality present —
-                # derived from the flag columns rather than a hardcoded has_spectra/has_image pair.
-                flag_cols = [c for c in manifest.columns if c.startswith("has_")]
-                n_present = manifest.loc[excluded_mask, flag_cols].sum(axis=1)
-                manifest.loc[excluded_mask, "tier"] = np.where(n_present >= 2, "joint", "single")
+                manifest.loc[excluded_mask, "tier"] = "single"  # one modality — never joint
             manifest_dirty = True
 
     if manifest_dirty:
