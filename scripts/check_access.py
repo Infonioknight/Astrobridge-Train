@@ -42,6 +42,10 @@ def main() -> None:
         f"dataset access: {cfg.sources.image.hf_path}",
         lambda: api.dataset_info(cfg.sources.image.hf_path),
     )
+    results["image caption dataset (repo)"] = _check(
+        f"dataset access: {cfg.sources.image_captions.hf_path}",
+        lambda: api.dataset_info(cfg.sources.image_captions.hf_path),
+    )
 
     def _check_image_files():
         files = api.list_repo_files(cfg.sources.image.hf_path, repo_type="dataset")
@@ -51,11 +55,15 @@ def main() -> None:
                 "the image pixel-data pipeline (02_cache_embeddings.py) depends on this exact "
                 "filename; check configs/data.yaml and data/image_dataset.py:FLUX_PARQUET_FILENAME."
             )
-        if not any(f.endswith("_captions.json") for f in files):
-            raise FileNotFoundError("No *_captions.json files found — image-tier captions depend on these.")
+        cap_files = api.list_repo_files(cfg.sources.image_captions.hf_path, repo_type="dataset")
+        if not any(f.startswith("data/") and f.endswith(".parquet") for f in cap_files):
+            raise FileNotFoundError(
+                f"No data/*.parquet in {cfg.sources.image_captions.hf_path} — image-tier "
+                "captions (caption_fused) depend on these."
+            )
 
     results["image dataset (required files)"] = _check(
-        "legacy_south_all_images.parquet + *_captions.json present in the repo listing",
+        "legacy_south_all_images.parquet + image_captions data/*.parquet present in the repo listings",
         _check_image_files,
     )
 

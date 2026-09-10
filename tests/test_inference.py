@@ -11,6 +11,11 @@ import torch.nn as nn
 
 from captioner.inference import generate_caption
 from captioner.model.captioner import Captioner, FusionStack
+from tests.conftest import make_prompt_cfg
+
+_PROMPT_CFG = make_prompt_cfg(
+    instruction_variants=["Describe this observation.", "Describe the object shown, using only {modalities}."],
+)
 
 
 class _FakeBF16LLM(nn.Module):
@@ -73,7 +78,7 @@ def test_single_modality_generates_a_caption():
     model, encoders, out_dims, max_tokens = _make_model_and_encoders()
     caption = generate_caption(
         model, _FakeTokenizer(), encoders, out_dims, max_tokens,
-        "Describe using only {modalities}.", "cpu",
+        _PROMPT_CFG, "cpu",
         raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
         max_new_tokens=3,
     )
@@ -84,7 +89,7 @@ def test_both_modalities_generates_a_caption():
     model, encoders, out_dims, max_tokens = _make_model_and_encoders()
     caption = generate_caption(
         model, _FakeTokenizer(), encoders, out_dims, max_tokens,
-        "Describe using only {modalities}.", "cpu",
+        _PROMPT_CFG, "cpu",
         raw_inputs={
             "image": {"pixel_values": torch.zeros(1, 1, 4, 4)},
             "spectra": {"flux": torch.zeros(1, 6), "wavelength": torch.zeros(1, 6), "survey": ["desi"]},
@@ -99,39 +104,44 @@ def test_empty_raw_inputs_raises():
     try:
         generate_caption(
             model, _FakeTokenizer(), encoders, out_dims, max_tokens,
-            "Describe using only {modalities}.", "cpu", raw_inputs={},
+            _PROMPT_CFG, "cpu", raw_inputs={},
         )
         assert False, "expected ValueError"
     except ValueError as e:
         assert "empty" in str(e)
 
 
-def test_question_overrides_the_template_prompt_verbatim():
+def test_question_fills_the_instruction_slot_of_the_chat_template():
     model, encoders, out_dims, max_tokens = _make_model_and_encoders()
     tokenizer = _FakeTokenizer()
 
     generate_caption(
         model, tokenizer, encoders, out_dims, max_tokens,
-        "Describe using only {modalities}.", "cpu",
+        _PROMPT_CFG, "cpu",
         raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
         max_new_tokens=3, question="What kind of object is this?",
     )
 
-    assert tokenizer.seen_prompts == ["What kind of object is this?"]
+    # seen_prompts is [pre_text, post_text]; the question goes into post_text's {instruction}.
+    joined = "".join(tokenizer.seen_prompts)
+    assert "What kind of object is this?" in joined
+    assert "<|im_start|>assistant" in joined  # the post half carries the assistant header
 
 
-def test_no_question_falls_back_to_template():
+def test_no_question_uses_the_first_instruction_variant():
     model, encoders, out_dims, max_tokens = _make_model_and_encoders()
     tokenizer = _FakeTokenizer()
 
     generate_caption(
         model, tokenizer, encoders, out_dims, max_tokens,
-        "Describe using only {modalities}.", "cpu",
+        _PROMPT_CFG, "cpu",
         raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
         max_new_tokens=3,
     )
 
-    assert tokenizer.seen_prompts == ["Describe using only an image."]
+    joined = "".join(tokenizer.seen_prompts)
+    assert "Describe this observation." in joined  # instruction_variants[0]
+    assert "using only an image" not in joined  # the modality-explicit variant was not chosen
 
 
 def test_fewer_raw_tokens_than_max_tokens_are_padded_and_masked():
@@ -153,7 +163,7 @@ def test_fewer_raw_tokens_than_max_tokens_are_padded_and_masked():
 
     generate_caption(
         model, _FakeTokenizer(), encoders, out_dims, max_tokens,
-        "Describe using only {modalities}.", "cpu",
+        _PROMPT_CFG, "cpu",
         raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
         max_new_tokens=3,
     )
@@ -179,7 +189,7 @@ def test_more_raw_tokens_than_max_tokens_are_truncated():
 
     generate_caption(
         model, _FakeTokenizer(), encoders, out_dims, max_tokens,
-        "Describe using only {modalities}.", "cpu",
+        _PROMPT_CFG, "cpu",
         raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
         max_new_tokens=3,
     )
@@ -206,7 +216,7 @@ def test_absent_modality_gets_true_mask_not_zero_content_only():
 
     generate_caption(
         model, _FakeTokenizer(), encoders, out_dims, max_tokens,
-        "Describe using only {modalities}.", "cpu",
+        _PROMPT_CFG, "cpu",
         raw_inputs={"image": {"pixel_values": torch.zeros(1, 1, 4, 4)}},
         max_new_tokens=3,
     )

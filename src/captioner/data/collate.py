@@ -39,21 +39,27 @@ def collate_batch(
 
         modality_batch[name] = {"tokens": tokens, "mask": mask}
 
-    prompt_ids = pad_sequence([ex["prompt_ids"] for ex in examples], batch_first=True, padding_value=pad_token_id)
+    # `pre_ids` / `post_ids` are the chat-template text before and after the observation vectors
+    # (see data/dataset.py and configs/model.yaml's prompt block). Padded independently — the
+    # vectors sit between them in Captioner.forward, so they can't be one contiguous sequence.
+    pre_ids = pad_sequence([ex["pre_ids"] for ex in examples], batch_first=True, padding_value=pad_token_id)
+    post_ids = pad_sequence([ex["post_ids"] for ex in examples], batch_first=True, padding_value=pad_token_id)
     caption_ids = pad_sequence([ex["caption_ids"] for ex in examples], batch_first=True, padding_value=pad_token_id)
 
-    prompt_attn_mask = torch.zeros_like(prompt_ids)
-    for i, ex in enumerate(examples):
-        prompt_attn_mask[i, : ex["prompt_ids"].shape[0]] = 1
-
+    pre_attn_mask = torch.zeros_like(pre_ids)
+    post_attn_mask = torch.zeros_like(post_ids)
     caption_attn_mask = torch.zeros_like(caption_ids)
     for i, ex in enumerate(examples):
+        pre_attn_mask[i, : ex["pre_ids"].shape[0]] = 1
+        post_attn_mask[i, : ex["post_ids"].shape[0]] = 1
         caption_attn_mask[i, : ex["caption_ids"].shape[0]] = 1
 
     return {
         "modality_batch": modality_batch,
-        "prompt_ids": prompt_ids,
-        "prompt_attn_mask": prompt_attn_mask,
+        "pre_ids": pre_ids,
+        "pre_attn_mask": pre_attn_mask,
+        "post_ids": post_ids,
+        "post_attn_mask": post_attn_mask,
         "caption_ids": caption_ids,
         "caption_attn_mask": caption_attn_mask,
         "object_id": [ex["object_id"] for ex in examples],

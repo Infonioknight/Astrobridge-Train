@@ -10,9 +10,17 @@ sources:
     files:
       - observations/spectra/desi_sdss_subset_crossmatch_nolan_1.0arcsec.parquet
   image:
+    # PIXEL/FLUX source only now — `legacy_south_all_images.parquet` (real calibrated per-band
+    # flux for AION). Captions moved to their own repo below.
     hf_path: gapatron/legacy_survey_south_images_captions
     revision: null   # not a `datasets.load_dataset`-shaped repo — see data/image_dataset.py.
-                      # No `split` here: it's loaded as raw file pairs, not a HF Dataset split.
+  image_captions:
+    # `caption_fused` — Gemini's merged blind+properties+literature caption, one row per object
+    # in parquet shards. Was gapatron/legacy_survey_south_images_captions' per-object
+    # *_captions.json (`caption_blind`); this repo is the same author's superset. Keyed by
+    # object_id in the Legacy Survey namespace (matched via object_id_legacy, same as before).
+    hf_path: gapatron/astrobridge-image-captions
+    revision: null
   spectra_captions:
     # Teammate-produced, spectrum-grounded LLM captions (Gemini) — the spectra-tier equivalent
     # of gapatron's caption_blind for images. Spectra-tier captions are restricted to just the

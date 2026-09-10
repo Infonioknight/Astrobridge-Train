@@ -9,11 +9,35 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from omegaconf import OmegaConf
 
 from captioner.model.captioner import IGNORE_INDEX, Captioner, FusionStack
 
 VOCAB_SIZE = 64
 D_LLM = 32
+
+
+def make_prompt_cfg(
+    wrapper_pre: str = "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n<observation>",
+    wrapper_post: str = "</observation>\n{instruction}<|im_end|>\n<|im_start|>assistant\n",
+    caption_suffix: str = "<|im_end|>",
+    system_variants: list[str] | None = None,
+    instruction_variants: list[str] | None = None,
+):
+    """The `prompt:` config block CaptionerDataset / generate_caption now expect (was a bare
+    template string). Two variants each by default so the sampling helpers have something to
+    choose between.
+    """
+    return OmegaConf.create(
+        {
+            "wrapper_pre": wrapper_pre,
+            "wrapper_post": wrapper_post,
+            "caption_suffix": caption_suffix,
+            "system_variants": system_variants or ["You are an astronomy assistant.", "You are an expert astronomy assistant."],
+            "instruction_variants": instruction_variants
+            or ["Describe this observation.", "Describe the object shown, using only {modalities}."],
+        }
+    )
 
 
 class TinyCausalLM(nn.Module):

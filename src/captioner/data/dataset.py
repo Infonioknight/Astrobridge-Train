@@ -11,13 +11,14 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import torch
 from omegaconf import DictConfig
 from torch.utils.data import Dataset
 
 from captioner.data.cache import assert_cache_matches_config, cache_dir_for, load_cache_index
 from captioner.encoders.registry import encoder_hash, encoder_spec
 from captioner.utils.logging import get_logger
-from captioner.utils.prompt import human_readable_subset
+from captioner.utils.prompt import build_wrapper_text, pick_prompt_variants
 
 logger = get_logger(__name__)
 
@@ -48,7 +49,7 @@ class CaptionerDataset(Dataset):
         cache_root: Path,
         split: str,
         tokenizer,
-        prompt_template: str,
+        prompt_cfg: DictConfig,
         max_caption_tokens: int = 128,
     ) -> None:
         self.manifest = manifest[manifest["split"] == split].reset_index(drop=True)
@@ -72,8 +73,12 @@ class CaptionerDataset(Dataset):
         ]
 
         self.tokenizer = tokenizer
-        self.prompt_template = prompt_template
+        self.prompt_cfg = prompt_cfg
         self.max_caption_tokens = max_caption_tokens
+        # Tokenized once — appended to every caption target so the model learns to stop.
+        self._caption_suffix_ids = tokenizer(
+            str(prompt_cfg.caption_suffix), add_special_tokens=False, return_tensors="pt",
+        )["input_ids"][0]
 
         self._captions_by_key = {
             (row["object_id"], frozenset(row["subset"])): row["text"]
@@ -156,21 +161,37 @@ class CaptionerDataset(Dataset):
                 modality_arrays[name] = None
 
         caption_text = self._captions_by_key.get((object_id, shown), "")
-        prompt_text = self.prompt_template.format(modalities=human_readable_subset(shown))
 
-        prompt_ids = self.tokenizer(prompt_text, add_special_tokens=False, return_tensors="pt")["input_ids"][0]
-        caption_ids = self.tokenizer(
-            caption_text,
-            add_special_tokens=False,
-            truncation=True,
-            max_length=self.max_caption_tokens,
-            return_tensors="pt",
-        )["input_ids"][0]
+        # Same seeded rng that picked `shown` — so the (system, instruction) draw is reproducible
+        # per (object_id, epoch) but varies across objects and re-rolls each epoch, giving the
+        # model the whole system x instruction cross-product over a run.
+        system, instruction = pick_prompt_variants(self.prompt_cfg, shown, rng)
+        pre_text, post_text = build_wrapper_text(self.prompt_cfg, system, instruction)
+
+        pre_ids = self.tokenizer(pre_text, add_special_tokens=False, return_tensors="pt")["input_ids"][0]
+        post_ids = self.tokenizer(post_text, add_special_tokens=False, return_tensors="pt")["input_ids"][0]
+        # Truncate the caption itself so caption + suffix stays within the budget — never let the
+        # <|im_end|> stop token be the thing that gets cut.
+        if caption_text:
+            cap_ids = self.tokenizer(
+                caption_text,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=max(1, self.max_caption_tokens - len(self._caption_suffix_ids)),
+                return_tensors="pt",
+            )["input_ids"][0]
+            caption_ids = torch.cat([cap_ids, self._caption_suffix_ids])
+        else:
+            # Defensive: `_sample_target_subset` only picks captioned subsets, but keeps an empty
+            # fallback. Leave caption_ids empty (not just <|im_end|>) so the degenerate-batch
+            # guard in train/loop.py still recognises a caption-less example.
+            caption_ids = torch.empty(0, dtype=torch.long)
 
         return {
             "object_id": object_id,
             "shown": shown,
             "modality_arrays": modality_arrays,
-            "prompt_ids": prompt_ids,
+            "pre_ids": pre_ids,
+            "post_ids": post_ids,
             "caption_ids": caption_ids,
         }

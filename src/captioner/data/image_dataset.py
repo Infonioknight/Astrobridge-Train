@@ -1,14 +1,16 @@
-"""Loaders for `gapatron/legacy_survey_south_images_captions`, against two *confirmed* real
-shapes — neither is the `datasets.load_dataset`-with-an-`image`-column shape this codebase
-originally assumed.
+"""Loaders for the image tier's two data shapes — neither is the `datasets.load_dataset`-with-an-
+`image`-column shape this codebase originally assumed.
 
-**Caption source** (`load_image_captions_table`): raw file pairs, `{object_id}_rgb.png` +
-`{object_id}_captions.json`, 2,410 pairs (the repo lists 4,821 files total: 2,410 pairs + one
-`.gitattributes`). `caption_blind` is generated without literature/external context, i.e.
-grounded only in what the image itself shows, with the dataset's own leak-detection already
-checking for stage contamination — used directly for the image tier in 01_generate_captions.py
-rather than re-derived via our own keyword decomposition. Pixel data here is a rendered RGB PNG
-only, not usable for AION (see aion_image.py) — irrelevant now that real flux exists (below).
+**Caption source** (`load_image_captions_table`): `gapatron/astrobridge-image-captions` — parquet
+shards (`data/train-*.parquet`), one row per object with `object_id` plus four caption columns
+(`caption_blind`, `caption_properties`, `caption_literature`, `caption_fused`). We use
+`caption_fused` — the merged caption Gemini produces from the blind + properties + literature
+passes — directly for the image tier in 01_generate_captions.py, not re-derived via our own
+keyword decomposition. The parquet also carries per-band flux, but the pixel/flux source for AION
+stays `legacy_south_all_images.parquet` below, unchanged.
+
+(Was `gapatron/legacy_survey_south_images_captions`'s per-object `*_captions.json` files with
+`caption_blind`; the new repo is the same author's superset with the fused caption added.)
 
 **Pixel source** (`load_image_flux_identity_table` / `load_image_flux_pixels`):
 `legacy_south_all_images.parquet`, a *separate* file in the same repo — confirmed schema via
@@ -24,54 +26,52 @@ coordinate parsing needed, unlike the caption source above.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pandas as pd
 
 FLUX_PARQUET_FILENAME = "legacy_south_all_images.parquet"
-
-
-def download_caption_jsons(hf_path: str, revision: str | None = None, cache_dir: Path | None = None) -> Path:
-    """Pulls only the *_captions.json files, not the PNGs — caption text and coordinates don't
-    need pixel data, and this keeps the download to ~90MB instead of ~250MB.
-    """
-    from huggingface_hub import snapshot_download
-
-    local_dir = snapshot_download(
-        repo_id=hf_path,
-        repo_type="dataset",
-        revision=revision,
-        allow_patterns=["*_captions.json"],
-        cache_dir=str(cache_dir) if cache_dir else None,
-    )
-    return Path(local_dir)
+IMAGE_CAPTION_COLUMN = "caption_fused"
 
 
 def load_image_captions_table(
     hf_path: str, revision: str | None = None, cache_dir: Path | None = None
 ) -> pd.DataFrame:
-    """One row per object: object_id, caption_blind. That's the only pair actually consumed
-    (scripts/01_generate_captions.py looks up captions by object_id — identity/coordinates for
-    the manifest come from the flux parquet instead, see load_image_flux_identity_table above),
-    so that's all this returns; a caption with no `caption_blind` is dropped since there's
-    nothing to caption the image tier with.
+    """One row per object: `object_id`, `caption` (from `caption_fused`). Only these two columns
+    are read from the parquet shards — the flux columns in the same file are ignored (the AION
+    pixel source stays `legacy_south_all_images.parquet`). scripts/01_generate_captions.py looks
+    captions up by object id; identity/coordinates for the manifest come from the flux parquet.
+    A row with an empty `caption_fused` is dropped — nothing to caption the image tier with.
     """
-    local_dir = download_caption_jsons(hf_path, revision, cache_dir)
-    json_paths = sorted(local_dir.rglob("*_captions.json"))
-    if not json_paths:
+    from huggingface_hub import list_repo_files
+
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+
+    parquet_files = sorted(
+        f for f in list_repo_files(hf_path, repo_type="dataset", revision=revision)
+        if f.startswith("data/") and f.endswith(".parquet")
+    )
+    if not parquet_files:
         raise FileNotFoundError(
-            f"No *_captions.json files found under {local_dir} — check hf_path={hf_path!r} and "
-            "that gated access has actually been granted."
+            f"No data/*.parquet files in {hf_path!r} — check the repo layout and that gated "
+            "access has been granted."
         )
 
-    rows = []
-    for p in json_paths:
-        with open(p) as fh:
-            rec = json.load(fh)
-        rows.append({"object_id": rec.get("object_id"), "caption_blind": rec.get("caption_blind")})
+    frames = []
+    for f in parquet_files:
+        local = hf_hub_download(
+            repo_id=hf_path, filename=f, repo_type="dataset", revision=revision,
+            cache_dir=str(cache_dir) if cache_dir else None,
+        )
+        table = pq.read_table(local, columns=["object_id", IMAGE_CAPTION_COLUMN])
+        frames.append(table.to_pandas(ignore_metadata=True))
 
-    df = pd.DataFrame(rows).dropna(subset=["object_id", "caption_blind"]).reset_index(drop=True)
+    df = pd.concat(frames, ignore_index=True)
+    df = df.rename(columns={IMAGE_CAPTION_COLUMN: "caption"})
+    df["caption"] = df["caption"].astype("string").str.strip()
+    df = df.dropna(subset=["object_id", "caption"])
+    df = df[df["caption"].str.len() > 0].drop_duplicates(subset="object_id").reset_index(drop=True)
     return df
 
 

@@ -159,9 +159,11 @@ def run_training(
             with accelerator.accumulate(model):
                 out = model(
                     batch["modality_batch"],
-                    batch["prompt_ids"],
+                    batch["pre_ids"],
+                    batch["post_ids"],
                     batch["caption_ids"],
-                    batch["prompt_attn_mask"],
+                    batch["pre_attn_mask"],
+                    batch["post_attn_mask"],
                     batch["caption_attn_mask"],
                 )
                 accelerator.backward(out.loss)
@@ -221,12 +223,14 @@ def evaluate_loss(accelerator: Accelerator, model: Captioner, loader: DataLoader
             continue
         out = model(
             batch["modality_batch"],
-            batch["prompt_ids"],
+            batch["pre_ids"],
+            batch["post_ids"],
             batch["caption_ids"],
-            batch["prompt_attn_mask"],
+            batch["pre_attn_mask"],
+            batch["post_attn_mask"],
             batch["caption_attn_mask"],
         )
-        bs = batch["prompt_ids"].shape[0]
+        bs = batch["pre_ids"].shape[0]
         total_loss += out.loss.detach() * bs
         total_n += bs
     total_loss = accelerator.reduce(total_loss, reduction="sum")

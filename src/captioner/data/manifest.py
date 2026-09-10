@@ -43,7 +43,7 @@ def _load_image_table(cfg: DictConfig) -> pd.DataFrame:
     (see data/image_dataset.py) — this table's rows are objects that already have real
     per-band calibrated flux (usable for AION), and its `object_id` is AstroBridge-Data's own id
     (a direct join key below — see build_manifest's "object_id" join path), not a coordinate
-    match. The caption-only dataset is still used for `caption_blind` text in
+    match. The caption dataset (gapatron/astrobridge-image-captions) is still used for `caption_fused` text in
     scripts/01_generate_captions.py, just not for identity here.
     """
     from captioner.data.image_dataset import load_image_flux_identity_table
@@ -424,6 +424,17 @@ def write_manifest(cfg: DictConfig) -> None:
 
     split_hist = manifest["split"].value_counts().to_dict()
     stats["split_histogram"] = {k: int(v) for k, v in split_hist.items()}
+
+    # Hard fail rather than warn: an empty train or test split silently breaks training (no data)
+    # or makes evaluate_loss return a fake 0.0 every epoch and truncate training via early stop.
+    # This is the "final training run" gate — must not proceed on a broken split.
+    for required in ("train", "test"):
+        if int(split_hist.get(required, 0)) == 0:
+            raise ValueError(
+                f"Split {required!r} is empty ({split_hist}). Check the upstream `split` column in "
+                "the spectra parquet (configs/data.yaml sources.spectra.files) and "
+                "cfg.splits.honor_upstream / policy."
+            )
 
     n_upstream = (
         int(manifest[MANIFEST_UPSTREAM_SPLIT_COLUMN].notna().sum())
