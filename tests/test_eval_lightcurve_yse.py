@@ -9,7 +9,8 @@ import pandas as pd
 import pytest
 from omegaconf import OmegaConf
 
-from eval.datasets.lightcurve_yse import (
+from eval.datasets.lightcurve_yse import (  # noqa: F401 (balanced_sample used below)
+    balanced_sample,
     SN_CLASS_CODES,
     SN_LABELS,
     build_raw_inputs_lightcurve,
@@ -121,3 +122,23 @@ def test_stratified_sample_rare_class_gets_at_least_min_per_class():
     table = _synthetic_sn_table()
     sample = stratified_sample(table, 90, seed=0, min_per_class=3)
     assert sample["class_label"].value_counts()["SN Ibc"] >= 3
+
+
+def test_balanced_sample_draws_exactly_per_class_from_every_class():
+    sample = balanced_sample(_synthetic_sn_table(), 15, seed=0)
+    counts = sample["class_label"].value_counts()
+    assert counts["SN Ia"] == counts["SN II"] == counts["SN Ibc"] == 15
+    assert len(sample) == 45
+
+
+def test_balanced_sample_is_reproducible_and_seed_sensitive():
+    table = _synthetic_sn_table()
+    assert balanced_sample(table, 10, seed=1)["uid"].tolist() == balanced_sample(table, 10, seed=1)["uid"].tolist()
+    assert balanced_sample(table, 10, seed=1)["uid"].tolist() != balanced_sample(table, 10, seed=2)["uid"].tolist()
+
+
+def test_balanced_sample_rejects_a_per_class_bigger_than_the_rarest_class():
+    # SN Ibc has 15; asking for 16 of every class can't be honoured, and silently returning an
+    # imbalanced sample from a balance function would be the exact bug this raises to prevent.
+    with pytest.raises(ValueError, match="SN Ibc"):
+        balanced_sample(_synthetic_sn_table(), 16, seed=0)

@@ -46,6 +46,7 @@ from eval.datasets.lightcurve_yse import (
     SN_CLASS_CODE_PROMPT,
     SN_CLASS_CODES,
     SN_FREETEXT_PROMPT,
+    balanced_sample,
     build_raw_inputs_lightcurve,
     build_raw_inputs_with_image,
     load_host_image_table,
@@ -69,8 +70,9 @@ def main() -> None:
     parser.add_argument("--backend", choices=["local", "modal"], default="local")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--track", choices=["lightcurve_only", "lightcurve_plus_image"], default="lightcurve_only")
-    parser.add_argument("--n", type=int, default=None, help="total sample size across all 3 classes; omit to use the whole 266-object eval set")
-    parser.add_argument("--min-per-class", type=int, default=3, help="SN Ibc only has 15 objects total in this eval set, so keep this low")
+    parser.add_argument("--n", type=int, default=None, help="total sample size across all 3 classes, drawn population-PROPORTIONALLY (SN Ia will dominate); omit to use the whole 266-object eval set. Ignored if --per-class is given.")
+    parser.add_argument("--per-class", type=int, default=None, help="draw exactly this many objects from EACH class instead (equal buckets, no imbalance). Capped at SN Ibc's 15 in the YSE test set; overrides --n and --min-per-class.")
+    parser.add_argument("--min-per-class", type=int, default=3, help="proportional (--n) mode only: floor per class. SN Ibc only has 15 objects total in this eval set, so keep this low")
     parser.add_argument("--seed", type=int, default=0, help="the ONE seed that determines the whole sample (irrelevant if --n is omitted)")
     parser.add_argument(
         "--answer-format", choices=["verbose_class", "digit_code"], default="verbose_class",
@@ -112,9 +114,14 @@ def main() -> None:
         lc_table = lc_table.merge(image_table, on=["object_id", "class_label"], how="inner", suffixes=("", "_img"))
         logger.info(f"{len(lc_table)} objects have both lightcurve and host-image data.")
 
-    if args.n is not None:
+    if args.per_class is not None:
+        lc_table = balanced_sample(lc_table, args.per_class, args.seed)
+    elif args.n is not None:
         lc_table = stratified_sample(lc_table, args.n, args.seed, args.min_per_class)
-    logger.info(f"Evaluating {len(lc_table)} objects (track={args.track!r}).")
+    logger.info(
+        f"Evaluating {len(lc_table)} objects (track={args.track!r}): "
+        f"{lc_table['class_label'].value_counts().to_dict()}"
+    )
 
     # --- Side 1: base model, over the whole sample, via a rendered lightcurve plot -----------
     base_backend = get_backend(
@@ -170,15 +177,27 @@ def main() -> None:
         "base_max_new_tokens": base_max_new_tokens,
         "equipped_max_new_tokens": equipped_max_new_tokens,
         "base_enable_thinking": args.base_enable_thinking,
-        "sampling": {"n": args.n, "min_per_class": args.min_per_class, "seed": args.seed},
+        "sampling": {
+            "mode": "balanced" if args.per_class is not None else "proportional",
+            "per_class": args.per_class,
+            "n": args.n,
+            "min_per_class": args.min_per_class,
+            "seed": args.seed,
+            "actual_counts": lc_table["class_label"].value_counts().to_dict(),
+        },
         "objects": objects,
     }
 
     if args.out:
         out_path = Path(args.out)
     else:
-        n_desc = str(args.n) if args.n is not None else "all"
-        out_path = Path(f"outputs/eval/raw_generations/yse_{args.track}_seed{args.seed}_n{n_desc}.json")
+        if args.per_class is not None:
+            desc = f"bal{args.per_class}"
+        elif args.n is not None:
+            desc = f"n{args.n}"
+        else:
+            desc = "nall"
+        out_path = Path(f"outputs/eval/raw_generations/yse_{args.track}_seed{args.seed}_{desc}.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(output, indent=2))
     logger.info(f"Wrote {len(objects)} raw generations to {out_path}")

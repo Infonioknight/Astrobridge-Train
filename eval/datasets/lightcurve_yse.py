@@ -254,6 +254,35 @@ def stratified_sample(
     return table.loc[sampled_indices].reset_index(drop=True)
 
 
+def balanced_sample(
+    table: pd.DataFrame, per_class: int, seed: int, label_col: str = "class_label",
+) -> pd.DataFrame:
+    """Exactly `per_class` objects from EACH class — an equal-bucket draw, not the
+    population-proportional one `stratified_sample` does. Use this when the real class imbalance
+    (SN Ia 180 / SN II 71 / SN Ibc 15 in the YSE test set) would otherwise make per-class
+    precision/recall dominated by SN Ia and noisy for SN Ibc.
+
+    Deterministic given `seed`: one `numpy.random.default_rng(seed)` consumed in `SN_LABELS`'
+    fixed order. Raises if any class has fewer than `per_class` objects rather than silently
+    returning an unbalanced sample — an imbalanced result from a function whose whole job is
+    balance would be a quiet correctness bug, e.g. `per_class=16` against SN Ibc's 15.
+    """
+    rng = np.random.default_rng(seed)
+    groups = {label: table.index[table[label_col] == label].to_numpy() for label in SN_LABELS}
+    short = {label: len(idx) for label, idx in groups.items() if len(idx) < per_class}
+    if short:
+        raise ValueError(
+            f"balanced_sample(per_class={per_class}) needs {per_class} of every class, but "
+            f"{short} — lower per_class to at most {min(len(idx) for idx in groups.values())}."
+        )
+
+    sampled_indices = []
+    for label in SN_LABELS:
+        chosen = rng.choice(groups[label], size=per_class, replace=False)
+        sampled_indices.extend(chosen.tolist())
+    return table.loc[sampled_indices].reset_index(drop=True)
+
+
 def build_raw_inputs_lightcurve(row: pd.Series, cfg, seed: int = 0) -> dict:
     """Turns one `load_lightcurve_table` row into the `{"lightcurve": {...}}` shape
     `captioner.inference.generate_caption` expects — identical preprocessing
