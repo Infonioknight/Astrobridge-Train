@@ -40,7 +40,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-cov"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+    # eval/backend.py imports modal at module scope (deliberately — `modal deploy` resolves the
+    # `app` variable there), so tests/test_eval_backend.py can't even be collected without it and
+    # `make test` dies during collection. Dev-only: nothing in the training path imports modal.
+    "modal>=0.64",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

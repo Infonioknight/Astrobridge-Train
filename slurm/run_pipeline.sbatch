@@ -12,7 +12,8 @@
 #    7. collect metrics + groundedness reports into outputs/publish_files/
 #    8. make publish  +  upload those metrics files alongside the model
 #
-#  Submit:
+#  Submit from the repo root — #SBATCH --output paths are relative to the submission
+#  directory, not to PROJECT_DIR:
 #      sbatch slurm/run_pipeline.sbatch
 #  or override the upload target without editing this file:
 #      sbatch --export=ALL,HF_REPO_ID=UniverseTBD/astrobridge-model-v4_qwen \
@@ -111,7 +112,10 @@ fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
-run_step 01_install uv pip install -e ".[dev]"
+# Deliberately NOT stamped. It takes ~6s and is idempotent, whereas a stamp would skip the
+# reinstall after a dependency changes in pyproject.toml — leaving a re-submitted job running
+# against a stale environment and failing later for a reason the log doesn't explain.
+uv pip install -e ".[dev]"
 
 # =============================================================================
 #  README step 2 — Hugging Face auth
