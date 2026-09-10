@@ -29,9 +29,9 @@
 #SBATCH --partition=ghx4
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=64
-#SBATCH --gpus-per-node=4
-#SBATCH --mem=400g
+#SBATCH --cpus-per-task=16
+#SBATCH --gpus-per-node=1
+#SBATCH --mem=100g
 #SBATCH --time=48:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
@@ -42,10 +42,9 @@ set -euo pipefail
 #  SET ME — where the trained model + metrics get uploaded
 # =============================================================================
 # The HF Hub repo id to publish to, i.e. everything after huggingface.co/.
-# Leave empty to run the whole pipeline but stop before uploading anything.
-HF_REPO_ID="${HF_REPO_ID:-}"
-# Example:
-# HF_REPO_ID="${HF_REPO_ID:-UniverseTBD/astrobridge-model-v4_qwen}"
+# Defaults to this branch's target (UniverseTBD/astrobridge-model-v4_qwen); override with
+# `sbatch --export=ALL,HF_REPO_ID=...`, or set it empty to run everything but skip the upload.
+HF_REPO_ID="${HF_REPO_ID:-UniverseTBD/astrobridge-model-v4_qwen}"
 
 # Publish privately (default) or publicly.
 HF_PUBLIC="${HF_PUBLIC:-0}"
