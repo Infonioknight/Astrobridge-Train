@@ -39,18 +39,22 @@ def _load_spectra_table(cfg: DictConfig) -> pd.DataFrame:
 
 
 def _load_image_table(cfg: DictConfig) -> pd.DataFrame:
-    """Sources identity from `legacy_south_all_images.parquet`, not the caption-only RGB dataset
-    (see data/image_dataset.py) — this table's rows are objects that already have real
-    per-band calibrated flux (usable for AION), and its `object_id` is AstroBridge-Data's own id
-    (a direct join key below — see build_manifest's "object_id" join path), not a coordinate
-    match. The caption-only dataset is still used for `caption_blind` text in
-    scripts/01_generate_captions.py, just not for identity here.
+    """Identity + coordinates for every object that has real per-band calibrated flux (usable for
+    AION), from `gapatron/astrobridge-image-captions` — see data/image_dataset.py. The same
+    dataset supplies `caption_blind` text in scripts/01_generate_captions.py.
+
+    The returned frame has `object_id_legacy`, not `object_id`: this source carries the Legacy
+    Survey's own id, which shares no namespace with AstroBridge-Data's object_id, so build_manifest
+    below falls through to its coordinate-crossmatch path rather than merging on an id that would
+    match nothing. (The predecessor dataset's `target_object_id_target` *was* AstroBridge-Data's id
+    and took the direct-merge path — that path is still live for any future source that has one.)
     """
     from captioner.data.image_dataset import load_image_flux_identity_table
 
     return load_image_flux_identity_table(
         cfg.sources.image.hf_path,
         revision=cfg.sources.image.get("revision"),
+        surveys=list(cfg.sources.image.get("surveys") or []) or None,
     )
 
 
@@ -127,9 +131,10 @@ def build_manifest(cfg: DictConfig) -> tuple[pd.DataFrame, dict]:
         )
         join_method = join_key
     elif "object_id" in image_df.columns:
-        # legacy_south_all_images.parquet's object_id is target_object_id_target — already
-        # AstroBridge-Data's own id (these rows are pre-crossmatched by the dataset authors) —
-        # a direct, authoritative join, no coordinate fuzz-matching needed for this subset.
+        # A source whose object_id is already AstroBridge-Data's own id (i.e. rows pre-crossmatched
+        # by the dataset authors) — a direct, authoritative join, no coordinate fuzz-matching
+        # needed. Today's image source is NOT one of these (see _load_image_table), so this branch
+        # is dormant; it stays because it is strictly better than a crossmatch when it does apply.
         overlap = image_df["object_id"].isin(spectra_df["object_id"]).mean()
         logger.info(f"Direct object_id join: {overlap:.1%} of image-table object_ids matched a spectra object_id")
         if overlap < 0.5:
@@ -144,9 +149,12 @@ def build_manifest(cfg: DictConfig) -> tuple[pd.DataFrame, dict]:
         )
         join_method = "object_id"
     else:
-        logger.warning(
-            f"{join_key} not present in both tables; falling back to coordinate crossmatch "
-            f"at {cfg.join.fallback_radius_arcsec} arcsec"
+        # The normal path for today's sources, not an error case: the image dataset carries the
+        # Legacy Survey's own ids and the spectra table AstroBridge-Data's, with no shared key or
+        # namespace between them, so sky position is the only real way to relate the two.
+        logger.info(
+            f"{join_key} not present in both tables and no shared object_id namespace; "
+            f"crossmatching on coordinates at {cfg.join.fallback_radius_arcsec} arcsec"
         )
         matched = _crossmatch_coords(spectra_df, image_df, cfg.join.fallback_radius_arcsec)
         joint_mask = matched["_match_idx"] >= 0
@@ -166,6 +174,19 @@ def build_manifest(cfg: DictConfig) -> tuple[pd.DataFrame, dict]:
 
     if "object_id" not in merged_key.columns:
         merged_key["object_id"] = merged_key.index.astype(str)
+    elif "object_id_legacy" in merged_key.columns:
+        # Coordinate-crossmatch path: joint rows carry the spectra side's object_id, but rows that
+        # came from the image table alone have none — the image source has no AstroBridge-Data id
+        # to contribute. Left as NaN they would all stringify to the *same* "nan" below, collapsing
+        # every image-only object into one duplicated key (which assign_splits' one-split-per-object
+        # assertion catches, but only after the manifest is already wrong). Backfill from the Legacy
+        # Survey's own id, which is unique and is what the embedding cache is keyed by anyway.
+        missing = merged_key["object_id"].isna()
+        if missing.any():
+            merged_key.loc[missing, "object_id"] = merged_key.loc[missing, "object_id_legacy"]
+            logger.info(
+                f"Backfilled object_id from object_id_legacy for {int(missing.sum())} image-only objects"
+            )
 
     # Transients are APPENDED, never merged: a ZTF designation shares no namespace with
     # AstroBridge-Data's object_id, the Legacy Survey's object_id_legacy, or the Gemini captions'

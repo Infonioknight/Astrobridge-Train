@@ -44,18 +44,21 @@ def main() -> None:
     )
 
     def _check_image_files():
+        from fnmatch import fnmatch
+
+        from captioner.data.image_dataset import DATA_FILE_PATTERN
+
         files = api.list_repo_files(cfg.sources.image.hf_path, repo_type="dataset")
-        if "legacy_south_all_images.parquet" not in files:
+        shards = [f for f in files if fnmatch(f, DATA_FILE_PATTERN)]
+        if not shards:
             raise FileNotFoundError(
-                "legacy_south_all_images.parquet not found in repo file listing — "
-                "the image pixel-data pipeline (02_cache_embeddings.py) depends on this exact "
-                "filename; check configs/data.yaml and data/image_dataset.py:FLUX_PARQUET_FILENAME."
+                f"No files matching {DATA_FILE_PATTERN!r} in the repo listing — both image-tier "
+                "captions and the pixel-data pipeline (02_cache_embeddings.py) read these shards; "
+                "check configs/data.yaml and data/image_dataset.py:DATA_FILE_PATTERN."
             )
-        if not any(f.endswith("_captions.json") for f in files):
-            raise FileNotFoundError("No *_captions.json files found — image-tier captions depend on these.")
 
     results["image dataset (required files)"] = _check(
-        "legacy_south_all_images.parquet + *_captions.json present in the repo listing",
+        f"{cfg.sources.image.hf_path} data/train-*.parquet shards present in the repo listing",
         _check_image_files,
     )
 

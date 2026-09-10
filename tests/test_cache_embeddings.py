@@ -118,3 +118,38 @@ class TestFluxToArray:
         # must be caught explicitly rather than let a wrongly-shaped array through unnoticed.
         with pytest.raises(ValueError, match="no usable rows at all"):
             cache_script._flux_to_array([None, None], "obj4", "g")
+
+
+def test_id_map_translates_manifest_ids_to_image_source_ids():
+    """Joint-tier objects take their object_id from the spectra side of the coordinate crossmatch
+    (data/manifest.py), while their pixels stay filed under the image dataset's own Legacy Survey
+    id. Without the translation the loader looks up an id that was never a key.
+    """
+    pixels_by_id = {"0001m057-6125": [_band("des-g", 1.0), _band("des-r", 2.0), _band("des-z", 3.0)]}
+    loader = cache_script._image_batch_loader(
+        pixels_by_id, ["DES-G", "DES-R", "DES-Z"], {"astrobridge_id_42": "0001m057-6125"}
+    )
+
+    batch = loader(["astrobridge_id_42"])
+
+    assert batch["pixel_values"].shape == (1, 3, 4, 4)
+
+
+def test_absent_id_map_keeps_the_identity_lookup():
+    """Image-only objects carry the Legacy Survey id as their manifest object_id already."""
+    pixels_by_id = {"obj1": [_band("des-g", 1.0), _band("des-r", 2.0), _band("des-z", 3.0)]}
+    loader = cache_script._image_batch_loader(pixels_by_id, ["DES-G", "DES-R", "DES-Z"])
+
+    assert loader(["obj1"])["pixel_values"].shape == (1, 3, 4, 4)
+
+
+def test_unknown_object_raises_with_both_ids_named():
+    """A manifest that has drifted from the dataset should say so, not surface as a bare KeyError
+    on an id the reader has never seen.
+    """
+    loader = cache_script._image_batch_loader({}, ["DES-G"], {"manifest_id": "legacy_id"})
+    try:
+        loader(["manifest_id"])
+        assert False, "expected KeyError"
+    except KeyError as e:
+        assert "manifest_id" in str(e) and "legacy_id" in str(e)

@@ -3,8 +3,9 @@
 float16 shards + an index parquet (§5). Training never imports this module's encoders.
 
 Both field schemas are confirmed against real data: spectra via AstroBridge-Data's `spectrum`
-struct (`flux`/`ivar`/`lambda`/`mask`), image via `legacy_south_all_images.parquet`'s
-`image_legacy` (list of per-band `{band, flux, mask, ivar, psf_fwhm, scale}` structs), and light
+struct (`flux`/`ivar`/`lambda`/`mask`), image via gapatron/astrobridge-image-captions' flat
+per-band `flux_{g,r,i,z}` columns (reassembled into `{band, flux, mask, ivar, psf_fwhm, scale}`
+dicts by data/image_dataset.py:load_image_flux_pixels), and light
 curves via BuildNg/astrobridge-transients-dataset's `atcat_*` arrays — see data/image_dataset.py,
 data/transients_dataset.py and the three batch loaders below.
 """
@@ -178,25 +179,38 @@ def _canonical_band(label: str) -> str:
     return label.strip().lower().split("-")[-1].split("_")[-1]
 
 
-def _image_batch_loader(pixels_by_id: dict, bands: list[str]):
-    """`pixels_by_id`: {object_id: list of {band, flux, mask, ivar, psf_fwhm, scale} dicts} from
-    data/image_dataset.py:load_image_flux_pixels — real calibrated per-band flux from
-    legacy_south_all_images.parquet's `image_legacy` field. Bands are matched by canonical name
-    (see _canonical_band), not by list position — position isn't guaranteed order in the source
-    data. Only `flux` is used; `mask`/`ivar`/`psf_fwhm`/`scale` aren't part of AION's
+def _image_batch_loader(pixels_by_id: dict, bands: list[str], id_map: dict[str, str] | None = None):
+    """`pixels_by_id`: {object_id_legacy: list of {band, flux, mask, ivar, psf_fwhm, scale} dicts}
+    from data/image_dataset.py:load_image_flux_pixels — real calibrated per-band flux, reassembled
+    from gapatron/astrobridge-image-captions' flat `flux_{g,r,i,z}` columns. Bands are matched by
+    canonical name (see _canonical_band), not by list position — position isn't guaranteed order in
+    the source data. Only `flux` is used; `mask`/`ivar`/`psf_fwhm`/`scale` aren't part of AION's
     LegacySurveyImage constructor (confirmed against a working probe script — see aion_image.py).
+
+    `id_map` translates a manifest object_id to the Legacy Survey id `pixels_by_id` is keyed by.
+    The two differ for joint-tier objects, which take their object_id from the spectra side of the
+    coordinate crossmatch (see data/manifest.py) while their pixels are still filed under the image
+    source's own id. Omit it when the two namespaces are the same.
     """
 
     def _load(object_ids: list[str]) -> dict[str, torch.Tensor]:
         per_object = []
         for oid in object_ids:
-            band_entries = {_canonical_band(e["band"]): e for e in pixels_by_id[oid]}
+            pixel_id = id_map.get(oid, oid) if id_map else oid
+            if pixel_id not in pixels_by_id:
+                raise KeyError(
+                    f"No image pixels for manifest object_id={oid!r} (looked up as {pixel_id!r}). "
+                    "The manifest's has_image flag and the image dataset have diverged — rebuild "
+                    "with `make manifest` before re-running the cache."
+                )
+            band_entries = {_canonical_band(e["band"]): e for e in pixels_by_id[pixel_id]}
             per_band = []
             for b in bands:
                 key = _canonical_band(b)
                 if key not in band_entries:
                     raise KeyError(
-                        f"Band {b!r} (canonicalized to {key!r}) not available for object {oid!r}; "
+                        f"Band {b!r} (canonicalized to {key!r}) not available for object {oid!r} "
+                        f"(image id {pixel_id!r}); "
                         f"bands present: {sorted(band_entries.keys())}."
                     )
                 per_band.append(_flux_to_array(band_entries[key]["flux"], oid, key))
@@ -247,12 +261,25 @@ def main() -> None:
         transients_by_id = transients_df.set_index("object_id").to_dict(orient="index")
 
     image_pixels_by_id = None
+    image_shape_by_id = None
+    image_id_map = None
     if "image" in modality_names:
-        from captioner.data.image_dataset import load_image_flux_pixels
+        from captioner.data.image_dataset import image_shape_groups, load_image_flux_pixels
 
         image_pixels_by_id = load_image_flux_pixels(
-            cfg.sources.image.hf_path, revision=cfg.sources.image.get("revision")
+            cfg.sources.image.hf_path,
+            revision=cfg.sources.image.get("revision"),
+            bands=list(cfg.modalities.image.encoder.kwargs.get("bands", [])) or None,
+            surveys=list(cfg.sources.image.get("surveys") or []) or None,
         )
+        image_shape_by_id = image_shape_groups(image_pixels_by_id)
+        # manifest object_id -> the image source's own id. Identical for image-only objects (see
+        # manifest.py's backfill) and different for joint ones, which are keyed by the spectra id.
+        if "object_id_legacy" in manifest.columns:
+            has_legacy = manifest["object_id_legacy"].notna()
+            image_id_map = dict(
+                zip(manifest.loc[has_legacy, "object_id"], manifest.loc[has_legacy, "object_id_legacy"])
+            )
 
     out_dir = Path(cfg.get("cache", {}).get("out_dir", "outputs/cache"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -265,7 +292,9 @@ def main() -> None:
         if name == "spectra":
             loader = _spectra_batch_loader(spectra_by_id)
         elif name == "image":
-            loader = _image_batch_loader(image_pixels_by_id, list(modality_cfg.encoder.kwargs.get("bands", [])))
+            loader = _image_batch_loader(
+                image_pixels_by_id, list(modality_cfg.encoder.kwargs.get("bands", [])), image_id_map
+            )
         elif name == "lightcurve":
             loader = _lightcurve_batch_loader(transients_by_id, modality_cfg)
         else:
@@ -274,13 +303,34 @@ def main() -> None:
                 f"modality is added to configs/modalities.yaml (impl={modality_cfg.encoder.impl})."
             )
 
-        sample_ids = manifest.loc[manifest[f"has_{name}"], "object_id"].head(min(50, len(manifest))).tolist()
+        # Image shards must not mix legacy-south's 160x160 cutouts with legacy-north's 152x152 —
+        # see data/cache.py:_shard_object_ids. Keyed by manifest object_id, which is what
+        # cache_modality partitions.
+        group_key = None
+        if name == "image" and image_shape_by_id is not None:
+            group_key = {
+                oid: image_shape_by_id.get((image_id_map or {}).get(oid, oid))
+                for oid in manifest.loc[manifest["has_image"], "object_id"]
+            }
+
+        # The round-trip sample is a real batch through the encoder, so it is subject to the same
+        # homogeneity rule as any shard — drawing the first 50 has_<name> objects straight off the
+        # manifest would straddle the shape boundary and fail in the batch loader before caching
+        # even starts. Take them from a single group instead.
+        eligible = manifest.loc[manifest[f"has_{name}"], "object_id"]
+        if group_key is not None and len(eligible):
+            first_group = group_key.get(eligible.iloc[0])
+            eligible = eligible[[group_key.get(o) == first_group for o in eligible]]
+        sample_ids = eligible.head(50).tolist()
         if sample_ids:
             sample_batch = loader(sample_ids)
             max_err = verify_fp16_roundtrip(encoder, sample_batch, n=len(sample_ids))
             logger.info(f"[{name}] float16 round-trip max abs error over {len(sample_ids)} objects: {max_err:.6f}")
 
-        _, excluded_ids = cache_modality(name, encoder, modality_cfg, manifest, loader, out_dir, shard=args.shard_size)
+        _, excluded_ids = cache_modality(
+            name, encoder, modality_cfg, manifest, loader, out_dir,
+            shard=args.shard_size, group_key=group_key,
+        )
         if excluded_ids:
             # Correct the manifest in place: has_<name>=False for objects whose embedding came
             # back non-finite, and re-derive `tier` for them (mirrors data/manifest.py's own

@@ -11,8 +11,11 @@ Three caption sources, kept deliberately separate:
     for now — objects with spectra but no Gemini caption get no spectra-tier caption at all,
     same asymmetry the image side already has (not every has_image object has a caption_blind
     match either). No fallback to mention_summary decomposition for the rest.
-  - image: gapatron's own `caption_blind` field (data/image_dataset.py) — same reasoning as
-    spectra above: pre-vetted, modality-restricted, preferred over decomposing text ourselves.
+  - image: gapatron's own pre-vetted caption field, `caption_blind` unless
+    configs/data.yaml's `sources.image.caption_field` says otherwise (data/image_dataset.py) —
+    same reasoning as spectra above: pre-vetted, modality-restricted, preferred over decomposing
+    text ourselves. Looked up by the image source's own id (`object_id_legacy` on the manifest
+    row), since joint-tier rows are keyed by the spectra side's object_id instead.
   - relational/joint claims (dormant — milestone 1 doesn't train on the joint tier, see
     configs/modalities.yaml's dropout weights): still decomposed from AstroBridge-Data's
     `mention_summary` via decompose_object, since Gemini's spectra captions and gapatron's image
@@ -82,7 +85,10 @@ def main() -> None:
         spectra_gemini_caption_by_object[oid] = grow["caption"]
 
     image_captions_df = load_image_captions_table(
-        cfg.sources.image.hf_path, revision=cfg.sources.image.get("revision")
+        cfg.sources.image.hf_path,
+        revision=cfg.sources.image.get("revision"),
+        caption_field=cfg.sources.image.get("caption_field", "caption_blind"),
+        surveys=list(cfg.sources.image.get("surveys") or []) or None,
     )
     image_caption_by_object = image_captions_df.set_index("object_id")["caption_blind"].to_dict()
 
@@ -230,11 +236,12 @@ def main() -> None:
     if image_caption_match_rate is not None and image_caption_match_rate < 0.5:
         logger.warning(
             f"Only {image_caption_match_rate:.1%} of image-available objects "
-            f"({n_image_from_gapatron}/{n_image_available}) found a caption_blind match. This is "
-            "the untested assumption that legacy_south_all_images.parquet's object_id_legacy "
-            "shares an id namespace with the caption JSON files' own object_id field — it may "
-            "not hold. Check a few manifest rows' object_id_legacy against real "
-            "*_captions.json filenames before trusting image-tier caption coverage."
+            f"({n_image_from_gapatron}/{n_image_available}) found a caption match. Captions and "
+            "flux now come from the same rows of the same dataset "
+            f"({cfg.sources.image.hf_path}), so this should be ~100% — anything less means the "
+            "manifest's object_id_legacy has drifted from the image dataset (a stale manifest "
+            "against a newer dataset revision), or rows were dropped for having no caption text "
+            f"in {cfg.sources.image.get('caption_field', 'caption_blind')!r}."
         )
 
     spectra_caption_match_rate = n_spectra_from_gemini / n_spectra_available if n_spectra_available else None
