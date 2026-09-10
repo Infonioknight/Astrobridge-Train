@@ -21,6 +21,7 @@ from omegaconf import OmegaConf
 from captioner.data.cache import cache_dir_for
 from captioner.encoders.registry import encoder_hash, encoder_spec
 from captioner.data.dataset import CaptionerDataset
+from tests.conftest import make_prompt_cfg
 
 
 class _FakeTokenizer:
@@ -90,7 +91,7 @@ def test_object_with_no_captioned_subset_is_dropped(tmp_path, modalities_cfg):
     _write_cache(tmp_path, "image", modalities_cfg.modalities.image, [])
     _write_cache(tmp_path, "spectra", modalities_cfg.modalities.spectra, ["keep", "drop"])
 
-    ds = CaptionerDataset(manifest, captions, modalities_cfg, tmp_path, "train", _FakeTokenizer(), "{modalities}")
+    ds = CaptionerDataset(manifest, captions, modalities_cfg, tmp_path, "train", _FakeTokenizer(), make_prompt_cfg())
 
     assert list(ds.manifest["object_id"]) == ["keep"]
     assert len(ds) == 1
@@ -108,9 +109,31 @@ def test_object_with_captioned_subset_survives_even_if_others_are_missing(tmp_pa
     _write_cache(tmp_path, "image", modalities_cfg.modalities.image, ["a"])
     _write_cache(tmp_path, "spectra", modalities_cfg.modalities.spectra, ["a"])
 
-    ds = CaptionerDataset(manifest, captions, modalities_cfg, tmp_path, "train", _FakeTokenizer(), "{modalities}")
+    ds = CaptionerDataset(manifest, captions, modalities_cfg, tmp_path, "train", _FakeTokenizer(), make_prompt_cfg())
 
     assert list(ds.manifest["object_id"]) == ["a"]
+
+
+def test_getitem_yields_the_chat_template_segments(tmp_path, modalities_cfg):
+    import torch
+
+    manifest = pd.DataFrame(
+        [{"object_id": "a", "has_image": False, "has_spectra": True, "split": "train"}]
+    )
+    captions = pd.DataFrame([{"object_id": "a", "subset": ["spectra"], "text": "a real caption"}])
+    _write_cache(tmp_path, "image", modalities_cfg.modalities.image, [])
+    _write_cache(tmp_path, "spectra", modalities_cfg.modalities.spectra, ["a"])
+
+    prompt_cfg = make_prompt_cfg()
+    ds = CaptionerDataset(manifest, captions, modalities_cfg, tmp_path, "train", _FakeTokenizer(), prompt_cfg)
+    item = ds[0]
+
+    assert set(item) == {"object_id", "shown", "modality_arrays", "pre_ids", "post_ids", "caption_ids"}
+    for key in ("pre_ids", "post_ids", "caption_ids"):
+        assert item[key].ndim == 1 and item[key].numel() > 0
+    # caption target ends with the tokenized caption_suffix (<|im_end|>) so the model learns to stop
+    suffix = ds._caption_suffix_ids
+    assert torch.equal(item["caption_ids"][-len(suffix):], suffix)
 
 
 def test_all_objects_captioned_drops_nothing(tmp_path, modalities_cfg):
@@ -130,6 +153,6 @@ def test_all_objects_captioned_drops_nothing(tmp_path, modalities_cfg):
     _write_cache(tmp_path, "image", modalities_cfg.modalities.image, [])
     _write_cache(tmp_path, "spectra", modalities_cfg.modalities.spectra, ["a", "b"])
 
-    ds = CaptionerDataset(manifest, captions, modalities_cfg, tmp_path, "train", _FakeTokenizer(), "{modalities}")
+    ds = CaptionerDataset(manifest, captions, modalities_cfg, tmp_path, "train", _FakeTokenizer(), make_prompt_cfg())
 
     assert set(ds.manifest["object_id"]) == {"a", "b"}

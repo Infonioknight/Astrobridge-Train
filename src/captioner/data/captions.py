@@ -25,29 +25,13 @@ LIGHTCURVE_KEYWORDS = (
     "brightness", "day",
 )
 
-# Claims a light curve CANNOT support, however photometric the rest of the sentence sounds.
-# Measured on the real data: 30/30 sampled `transient_caption` values name a catalog designation,
-# quote a spectroscopic redshift, or say "classified in literature as". Training the lightcurve tier
-# on those teaches the model to emit designations and redshifts from photometry alone — exactly the
-# hallucination this file's decomposition doctrine exists to prevent. Sentences matching this are
-# dropped, never reassigned (§4).
-#
-# Designations are anchored to a 19xx/20xx year on purpose: a naive `at\s?\d{4}` also matches
-# "at 58346", i.e. an MJD, which would silently veto legitimate photometry sentences.
-LIGHTCURVE_UNSUPPORTABLE = re.compile(
-    r"\bsn\s?(?:19|20)\d{2}[a-z]{0,3}\b"        # SN 2018bti, SN 2025uso
-    r"|\bat\s?(?:19|20)\d{2}[a-z]{1,3}\b"       # AT 2020hvn
-    r"|\basassn[- ]?\d*[a-z]*"                    # ASASSN-19av
-    r"|\bztf\d{2}[a-z]{5,}\b"                    # ZTF18aaykjei
-    r"|redshift"
-    r"|(?<![a-z])z\s*(?:=|\u2248|~|\\approx|\\sim)"   # $z = 0.0248$, z \approx 0.03
-    r"|literature"
-    r"|catalog"
-    r"|spectroscop"
-    r"|classif"
-    r"|\btype\s+i",                               # "Type Ia" — a spectroscopic classification
-    re.IGNORECASE,
-)
+# NOTE: an earlier `LIGHTCURVE_UNSUPPORTABLE` regex veto lived here — it dropped any
+# lightcurve sentence naming a designation, redshift, "literature", "classif",
+# "spectroscop", or "Type I[abc]". Removed deliberately (RETRAIN_SKETCH.md B3): transient
+# captions are now used RAW in scripts/01_generate_captions.py, so the model sees the explicit
+# (lightcurve -> SN type) signal, at the cost of also seeing claims a light curve alone cannot
+# ground. The lightcurve branch of `_tag_support` below is now a plain keyword check, symmetric
+# with spectra/image.
 
 
 @dataclass
@@ -85,11 +69,7 @@ def _tag_support(sentence: str, available_modalities: frozenset[str]) -> frozens
         supports.add("spectra")
     if "image" in available_modalities and any(k in low for k in IMAGE_KEYWORDS):
         supports.add("image")
-    if (
-        "lightcurve" in available_modalities
-        and any(k in low for k in LIGHTCURVE_KEYWORDS)
-        and not LIGHTCURVE_UNSUPPORTABLE.search(low)
-    ):
+    if "lightcurve" in available_modalities and any(k in low for k in LIGHTCURVE_KEYWORDS):
         supports.add("lightcurve")
     if len(supports) > 1 or (len(supports) == 1 and any(m in low for m in RELATIONAL_MARKERS)):
         pass  # relational marker alone doesn't add support beyond what keywords already found

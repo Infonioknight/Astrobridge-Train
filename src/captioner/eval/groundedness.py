@@ -44,14 +44,18 @@ def _generate_caption(model: Captioner, tokenizer, batch: dict, device: str, max
     model.eval()
     fusion_stack = model.fusion_stack
     modality_batch = {k: {kk: vv.to(device) for kk, vv in v.items()} for k, v in batch["modality_batch"].items()}
-    prompt_ids = batch["prompt_ids"].to(device)
+    # Chat-template batch shape: text before the observation vectors, then after (incl. the
+    # <|im_start|>assistant\n header) — generation continues from the end of post_ids.
+    pre_ids = batch["pre_ids"].to(device)
+    post_ids = batch["post_ids"].to(device)
 
     device_type = "cuda" if str(device).startswith("cuda") else "cpu"
     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
         prefix = fusion_stack(modality_batch)
         embed_fn = model.llm.get_input_embeddings()
-        prompt_embeds = embed_fn(prompt_ids)
-        inputs_embeds = torch.cat([prefix, prompt_embeds], dim=1)
+        pre_embeds = embed_fn(pre_ids)
+        post_embeds = embed_fn(post_ids)
+        inputs_embeds = torch.cat([pre_embeds, prefix, post_embeds], dim=1)
         attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=device)
 
         gen = model.llm.generate(

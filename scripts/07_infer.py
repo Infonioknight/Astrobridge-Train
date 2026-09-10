@@ -115,7 +115,7 @@ def main() -> None:
     max_tokens = {n: int(c.max_tokens) for n, c in cfg.modalities.items()}
 
     answer = generate_caption(
-        model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt.template, args.device,
+        model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt, args.device,
         raw_inputs, max_new_tokens=args.max_new_tokens, question=args.question,
     )
     logger.info(f"Answer: {answer}")

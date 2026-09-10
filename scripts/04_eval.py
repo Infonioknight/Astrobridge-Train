@@ -55,7 +55,7 @@ def main() -> None:
     model.to(cfg.get("device", "cuda"))
 
     cache_root = Path(cfg.get("cache", {}).get("out_dir", "outputs/cache"))
-    dataset = CaptionerDataset(manifest, captions, cfg, cache_root, args.split, tokenizer, cfg.prompt.template)
+    dataset = CaptionerDataset(manifest, captions, cfg, cache_root, args.split, tokenizer, cfg.prompt)
 
     report = build_groundedness_report(
         model, dataset, dataset.modality_names, tokenizer, cfg.get("device", "cuda"), Path(args.out)

@@ -60,8 +60,38 @@ def test_rows_missing_caption_are_dropped(tmp_path):
     with _patch_shards(path):
         df = load_image_captions_table("irrelevant/repo")
 
+    def _set(rows_by_file: dict[str, list[dict]]):
+        for name, rows in rows_by_file.items():
+            shards[name] = str(_write_shard(tmp_path, rows, name))
+
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", lambda repo_id, **kw: list(shards.keys()))
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo_id, filename, **kw: shards[filename])
+    return _set
+
+
+def test_caption_fused_column_is_returned_as_caption(_patch_hub):
+    _patch_hub({
+        "data/train-00000-of-00001.parquet": [
+            {"object_id": "a", IMAGE_CAPTION_COLUMN: "A compact source.", "flux_g": [1, 2]},
+            {"object_id": "b", IMAGE_CAPTION_COLUMN: "An extended disk.", "flux_g": [3, 4]},
+        ],
+    })
+    df = load_image_captions_table("gapatron/astrobridge-image-captions")
+    assert list(df.columns) == ["object_id", "caption"]
+    assert dict(zip(df["object_id"], df["caption"])) == {"a": "A compact source.", "b": "An extended disk."}
+
+
+def test_empty_and_missing_captions_are_dropped(_patch_hub):
+    _patch_hub({
+        "data/train-00000-of-00001.parquet": [
+            {"object_id": "a", IMAGE_CAPTION_COLUMN: "A galaxy."},
+            {"object_id": "b", IMAGE_CAPTION_COLUMN: ""},
+            {"object_id": "c", IMAGE_CAPTION_COLUMN: "   "},
+            {"object_id": "d", IMAGE_CAPTION_COLUMN: None},
+        ],
+    })
+    df = load_image_captions_table("gapatron/astrobridge-image-captions")
     assert list(df["object_id"]) == ["a"]
-    assert df.iloc[0]["caption_blind"] == "A galaxy."
 
 
 def test_caption_field_selects_the_stage_but_keeps_the_column_name(tmp_path):

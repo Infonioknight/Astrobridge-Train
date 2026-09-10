@@ -446,6 +446,17 @@ def write_manifest(cfg: DictConfig) -> None:
     split_hist = manifest["split"].value_counts().to_dict()
     stats["split_histogram"] = {k: int(v) for k, v in split_hist.items()}
 
+    # Hard fail rather than warn: an empty train or test split silently breaks training (no data)
+    # or makes evaluate_loss return a fake 0.0 every epoch and truncate training via early stop.
+    # This is the "final training run" gate — must not proceed on a broken split.
+    for required in ("train", "test"):
+        if int(split_hist.get(required, 0)) == 0:
+            raise ValueError(
+                f"Split {required!r} is empty ({split_hist}). Check the upstream `split` column in "
+                "the spectra parquet (configs/data.yaml sources.spectra.files) and "
+                "cfg.splits.honor_upstream / policy."
+            )
+
     n_upstream = (
         int(manifest[MANIFEST_UPSTREAM_SPLIT_COLUMN].notna().sum())
         if MANIFEST_UPSTREAM_SPLIT_COLUMN in manifest.columns

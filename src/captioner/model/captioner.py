@@ -92,26 +92,32 @@ class Captioner(nn.Module):
     def forward(
         self,
         modality_batch: dict[str, dict[str, Tensor]],
-        prompt_ids: Tensor,       # (B, P)
-        caption_ids: Tensor,      # (B, C)
-        prompt_attn_mask: Tensor | None = None,   # (B, P) 1 for real prompt tokens, 0 for pad
-        caption_attn_mask: Tensor | None = None,  # (B, C) 1 for real caption tokens, 0 for pad
+        pre_ids: Tensor,          # (B, Ppre)  chat-template text BEFORE the observation vectors
+        post_ids: Tensor,         # (B, Ppost) chat-template text AFTER the vectors, incl. the assistant header
+        caption_ids: Tensor,      # (B, C)     the loss target
+        pre_attn_mask: Tensor | None = None,      # (B, Ppre) 1 real / 0 pad
+        post_attn_mask: Tensor | None = None,     # (B, Ppost) 1 real / 0 pad
+        caption_attn_mask: Tensor | None = None,  # (B, C) 1 real / 0 pad
     ):
-        device = prompt_ids.device
-        B, P = prompt_ids.shape
+        device = pre_ids.device
+        B, Ppre = pre_ids.shape
+        Ppost = post_ids.shape[1]
         C = caption_ids.shape[1]
 
         prefix = self.fusion_stack(modality_batch)                        # (B, n_queries, d_llm)
         embed_fn = self.llm.get_input_embeddings()
-        prompt_embeds = embed_fn(prompt_ids)                               # (B, P, d_llm)
-        target_embeds = embed_fn(caption_ids)                              # (B, C, d_llm)
+        pre_embeds = embed_fn(pre_ids)                                     # (B, Ppre, d_llm)
+        post_embeds = embed_fn(post_ids)                                   # (B, Ppost, d_llm)
+        target_embeds = embed_fn(caption_ids)                             # (B, C, d_llm)
 
-        inputs_embeds = torch.cat([prefix, prompt_embeds, target_embeds], dim=1)
+        # [ pre text | 48 observation vectors | post text (+ assistant header) | caption ]
+        inputs_embeds = torch.cat([pre_embeds, prefix, post_embeds, target_embeds], dim=1)
 
         labels = torch.cat(
             [
+                torch.full((B, Ppre), IGNORE_INDEX, dtype=torch.long, device=device),
                 torch.full((B, self.n_queries), IGNORE_INDEX, dtype=torch.long, device=device),
-                torch.full((B, P), IGNORE_INDEX, dtype=torch.long, device=device),
+                torch.full((B, Ppost), IGNORE_INDEX, dtype=torch.long, device=device),
                 caption_ids.masked_fill(caption_attn_mask == 0, IGNORE_INDEX)
                 if caption_attn_mask is not None
                 else caption_ids,
@@ -119,9 +125,10 @@ class Captioner(nn.Module):
             dim=1,
         )
 
+        pre_mask = pre_attn_mask if pre_attn_mask is not None else torch.ones((B, Ppre), dtype=torch.long, device=device)
         prefix_mask = torch.ones((B, self.n_queries), dtype=torch.long, device=device)
-        prompt_mask = prompt_attn_mask if prompt_attn_mask is not None else torch.ones((B, P), dtype=torch.long, device=device)
+        post_mask = post_attn_mask if post_attn_mask is not None else torch.ones((B, Ppost), dtype=torch.long, device=device)
         cap_mask = caption_attn_mask if caption_attn_mask is not None else torch.ones((B, C), dtype=torch.long, device=device)
-        attention_mask = torch.cat([prefix_mask, prompt_mask, cap_mask], dim=1)
+        attention_mask = torch.cat([pre_mask, prefix_mask, post_mask, cap_mask], dim=1)
 
         return self.llm(inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels)

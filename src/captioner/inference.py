@@ -18,7 +18,7 @@ from captioner.encoders.registry import build_encoder
 from captioner.model.captioner import Captioner, FusionStack
 from captioner.publish import filter_missing_lora_keys
 from captioner.train.stage1 import build_llm, get_llm_hidden_size
-from captioner.utils.prompt import human_readable_subset
+from captioner.utils.prompt import build_wrapper_text, human_readable_subset
 
 
 def load_inference_model(
@@ -143,11 +143,12 @@ def generate_caption(
     encoders: dict,
     modality_out_dims: dict[str, int],
     modality_max_tokens: dict[str, int],
-    prompt_template: str,
+    prompt_cfg,
     device: str,
     raw_inputs: dict[str, dict[str, Any]],
     max_new_tokens: int = 128,
     question: str | None = None,
+    system: str | None = None,
 ) -> str:
     """`raw_inputs`: {modality_name: encoder-specific batch dict}, only for modalities actually
     present — e.g. {"image": {"pixel_values": ...}} or
@@ -159,12 +160,11 @@ def generate_caption(
     exact field contract. A modality absent from `raw_inputs` is treated as not shown at all —
     true exclusion (all-True mask), never a zero-content placeholder (§6).
 
-    `question`: free-form text used verbatim as the prompt instead of `prompt_template`'s fixed
-    "Describe the object shown, using only {modalities}." — LoRA/the fusion stack were only ever
-    trained against that one fixed instruction, so this leans entirely on the frozen base LLM's
-    own general instruction-following ability generalizing to a different instruction while
-    still conditioning on the visual/spectral prefix. Untested territory, not a guarantee —
-    that's the actual point of exposing it (see scripts/07_infer.py's --question flag).
+    Builds the same chat-template structure training used (`configs/model.yaml` prompt block):
+    `wrapper_pre` (with `system`) -> observation vectors -> `wrapper_post` (with the instruction)
+    -> generate. `question` fills the instruction slot; default is `prompt_cfg.instruction_
+    variants[0]`. `system` defaults to `prompt_cfg.system_variants[0]`. Both defaults are the
+    deterministic choice — training samples across all variants, inference pins one.
     """
     if not raw_inputs:
         raise ValueError("raw_inputs is empty — at least one modality must be provided.")
@@ -188,14 +188,19 @@ def generate_caption(
             mask[:, :n] = False
         modality_batch[name] = {"tokens": tokens, "mask": mask}
 
-    prompt_text = question if question is not None else prompt_template.format(modalities=human_readable_subset(shown))
-    prompt_ids = tokenizer(prompt_text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(device)
+    system = system if system is not None else str(prompt_cfg.system_variants[0])
+    instruction = question if question is not None else str(prompt_cfg.instruction_variants[0])
+    if "{modalities}" in instruction:
+        instruction = instruction.format(modalities=human_readable_subset(shown))
+    pre_text, post_text = build_wrapper_text(prompt_cfg, system, instruction)
+    pre_ids = tokenizer(pre_text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(device)
+    post_ids = tokenizer(post_text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(device)
 
     device_type = "cuda" if str(device).startswith("cuda") else "cpu"
     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
         prefix = model.fusion_stack(modality_batch)
-        prompt_embeds = model.llm.get_input_embeddings()(prompt_ids)
-        inputs_embeds = torch.cat([prefix, prompt_embeds], dim=1)
+        embed_fn = model.llm.get_input_embeddings()
+        inputs_embeds = torch.cat([embed_fn(pre_ids), prefix, embed_fn(post_ids)], dim=1)
         attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=device)
         gen = model.llm.generate(
             inputs_embeds=inputs_embeds,
