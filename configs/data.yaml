@@ -18,10 +18,15 @@ sources:
     hf_path: gapatron/astrobridge-image-captions
     revision: null   # read directly from data/train-*.parquet, not via `datasets.load_dataset`
                       # — see data/image_dataset.py. No `split` here: the repo has only `train`.
-    # Which caption stage feeds the image tier: caption_blind (image-only, no literature, no
-    # object name — what the pipeline has always used), caption_properties, caption_literature,
-    # or caption_fused (the dataset's own reconciled final pass).
-    caption_field: caption_blind
+    # Which caption stage feeds the image tier. caption_fused is the dataset's own final output:
+    # an editor pass that takes the three earlier drafts (blind, properties, literature) as
+    # proposals rather than ground truth and re-examines the pixels itself, resolving
+    # disagreements by looking at the image instead of trusting whichever draft sounded most
+    # confident. Same no-name/no-designation rule is enforced and re-checked on every stage, so
+    # it is no more leak-prone than caption_blind. Alternatives: caption_blind (image-only,
+    # open-ended), caption_properties (structured resolvedness/color/structure),
+    # caption_literature (image + capped literature excerpts).
+    caption_field: caption_fused
     # null/omitted = both surveys. Set to [legacy-south] to reproduce the pre-swap object set
     # exactly: one cutout size (160x160) and ivar/mask present throughout. legacy-north is
     # 152x152 with no ivar/mask/i-band — real gaps in that release, handled but worth knowing.
