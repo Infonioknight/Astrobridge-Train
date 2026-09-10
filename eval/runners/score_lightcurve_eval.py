@@ -25,7 +25,19 @@ logger = get_logger(__name__)
 def _hard_report(objects: list[dict], answer_key: str, predict) -> dict:
     y_true = [o["label_name"] for o in objects]
     y_pred = [predict(o[answer_key]) for o in objects]
-    return classification_report(y_true, y_pred, SN_LABELS)
+    report = classification_report(y_true, y_pred, SN_LABELS)
+
+    # Parse rate is a first-class number on the verbose path, not a footnote: tolerating long
+    # answers trades guaranteed-parseable output for answers that play to the model's trained
+    # voice, so how often that trade actually lands has to be visible. Unparsed answers are still
+    # counted as wrong in the metrics above (classification_report treats None as incorrect) —
+    # this reports them separately as well, never instead.
+    n_unparsed = sum(1 for p in y_pred if p is None)
+    report["parsing"] = {
+        "n_unparsed": n_unparsed,
+        "parse_rate": (len(y_pred) - n_unparsed) / len(y_pred) if y_pred else 0.0,
+    }
+    return report
 
 
 def main() -> None:

@@ -12,9 +12,13 @@ the equipped model gets the raw `atcat_*` arrays via `build_raw_inputs_lightcurv
 `build_raw_inputs_with_image` under `--track lightcurve_plus_image`) — genuinely different inputs
 per side, same as the image track's `image_rgb` vs `image_bands`.
 
-**Digit-code answer format**, same reasoning and same confirmed-live finding as the image track
-(`eval.datasets.image_galaxy10.CLASS_CODE_PROMPT`'s docstring): free-text label matching produced
-unreliable compliance, so both sides answer with `SN_CLASS_CODES`' digit code instead.
+**Verbose free-text answers, parsed for a class** (`--answer-format`, default `verbose_class`):
+both sides get a generous token budget and are free to answer at length, and whichever of the
+three classes the answer names is taken as the prediction. This replaced the digit-code default
+after real runs showed the digit layer collapsing to a single symbol regardless of the object —
+see `eval.datasets.lightcurve_yse.SN_FREETEXT_PROMPT`'s comment for that evidence and for why
+free text should work here specifically (the equipped model's own training captions end by naming
+the class). `--answer-format digit_code` still runs the old path for comparison.
 
 **Every random decision is seeded and saved**: the sample itself (`--seed`, `--n`,
 `--min-per-class`) is recorded in the output JSON, and greedy decoding (`do_sample=False`) makes
@@ -37,8 +41,10 @@ from captioner.utils.config import load_config, remaining_argv
 from captioner.utils.logging import get_logger
 from eval.backend import free_local_backend, get_backend
 from eval.datasets.lightcurve_yse import (
+    DEFAULT_FREETEXT_MAX_NEW_TOKENS,
     SN_CLASS_CODE_PROMPT,
     SN_CLASS_CODES,
+    SN_FREETEXT_PROMPT,
     build_raw_inputs_lightcurve,
     build_raw_inputs_with_image,
     load_host_image_table,
@@ -65,9 +71,18 @@ def main() -> None:
     parser.add_argument("--n", type=int, default=None, help="total sample size across all 3 classes; omit to use the whole 266-object eval set")
     parser.add_argument("--min-per-class", type=int, default=3, help="SN Ibc only has 15 objects total in this eval set, so keep this low")
     parser.add_argument("--seed", type=int, default=0, help="the ONE seed that determines the whole sample (irrelevant if --n is omitted)")
-    parser.add_argument("--question", default=SN_CLASS_CODE_PROMPT)
-    parser.add_argument("--base-max-new-tokens", type=int, default=DEFAULT_BASE_MAX_NEW_TOKENS)
-    parser.add_argument("--equipped-max-new-tokens", type=int, default=DEFAULT_EQUIPPED_MAX_NEW_TOKENS)
+    parser.add_argument(
+        "--answer-format", choices=["verbose_class", "digit_code"], default="verbose_class",
+        help="verbose_class (default): let both models answer at length and parse whichever class "
+             "the answer names (eval.metrics.caption_to_label.predict_label_from_free_text). "
+             "digit_code: the older path where the model must emit a bare digit — kept selectable "
+             "so the two can be compared on the same objects, but no longer the default: real "
+             "runs showed the digit layer collapsing to one symbol regardless of the object (see "
+             "SN_FREETEXT_PROMPT's comment in eval/datasets/lightcurve_yse.py).",
+    )
+    parser.add_argument("--question", default=None, help="defaults to SN_FREETEXT_PROMPT, or SN_CLASS_CODE_PROMPT under --answer-format digit_code")
+    parser.add_argument("--base-max-new-tokens", type=int, default=None, help=f"defaults to {DEFAULT_FREETEXT_MAX_NEW_TOKENS} (verbose_class) or {DEFAULT_BASE_MAX_NEW_TOKENS} (digit_code)")
+    parser.add_argument("--equipped-max-new-tokens", type=int, default=None, help=f"defaults to {DEFAULT_FREETEXT_MAX_NEW_TOKENS} (verbose_class) or {DEFAULT_EQUIPPED_MAX_NEW_TOKENS} (digit_code)")
     parser.add_argument(
         "--base-enable-thinking", action="store_true", default=False,
         help="Off by default — see collect_image_labels.py's identical flag: leaving Qwen3.5's "
@@ -76,6 +91,17 @@ def main() -> None:
     )
     parser.add_argument("--out", default=None, help="defaults to outputs/eval/raw_generations/yse_<track>_seed<seed>_n<n>.json")
     args = parser.parse_args(remaining_argv())
+
+    verbose_mode = args.answer_format == "verbose_class"
+    question = args.question if args.question is not None else (
+        SN_FREETEXT_PROMPT if verbose_mode else SN_CLASS_CODE_PROMPT
+    )
+    base_max_new_tokens = args.base_max_new_tokens if args.base_max_new_tokens is not None else (
+        DEFAULT_FREETEXT_MAX_NEW_TOKENS if verbose_mode else DEFAULT_BASE_MAX_NEW_TOKENS
+    )
+    equipped_max_new_tokens = args.equipped_max_new_tokens if args.equipped_max_new_tokens is not None else (
+        DEFAULT_FREETEXT_MAX_NEW_TOKENS if verbose_mode else DEFAULT_EQUIPPED_MAX_NEW_TOKENS
+    )
 
     cfg = load_config("base", "data", "modalities", "model", "stage2")
 
@@ -97,7 +123,7 @@ def main() -> None:
     for _, row in tqdm(lc_table.iterrows(), total=len(lc_table), desc="collect [base]"):
         image = render_lightcurve_plot(row)
         base_answers[row["object_id"]] = base_backend.generate(
-            {"image": image}, args.question, args.base_max_new_tokens,
+            {"image": image}, question, base_max_new_tokens,
         )
     if args.backend == "local":
         free_local_backend(base_backend)
@@ -114,7 +140,7 @@ def main() -> None:
             else build_raw_inputs_lightcurve(row, cfg)
         )
         equipped_answers[row["object_id"]] = equipped_backend.generate(
-            raw_inputs, args.question, args.equipped_max_new_tokens,
+            raw_inputs, question, equipped_max_new_tokens,
         )
     if args.backend == "local":
         free_local_backend(equipped_backend)
@@ -133,13 +159,15 @@ def main() -> None:
         "dataset": "BuildNg/astrobridge-yse-test-dataset-v2",
         "track": args.track,
         "repo_id": args.repo_id,
-        "question": args.question,
-        # "digit_code" tells score_lightcurve_eval.py to parse via predict_label_from_code
-        # (against class_codes below), not predict_label's free-text keyword matching.
-        "answer_format": "digit_code",
+        "question": question,
+        # Tells score_lightcurve_eval.py which parser to use — "verbose_class" reads whichever
+        # class the (deliberately verbose) answer names, "digit_code" parses a bare digit against
+        # class_codes. Using the wrong one returns None for every object silently, so it's
+        # recorded here rather than assumed at scoring time.
+        "answer_format": args.answer_format,
         "class_codes": SN_CLASS_CODES,
-        "base_max_new_tokens": args.base_max_new_tokens,
-        "equipped_max_new_tokens": args.equipped_max_new_tokens,
+        "base_max_new_tokens": base_max_new_tokens,
+        "equipped_max_new_tokens": equipped_max_new_tokens,
         "base_enable_thinking": args.base_enable_thinking,
         "sampling": {"n": args.n, "min_per_class": args.min_per_class, "seed": args.seed},
         "objects": objects,

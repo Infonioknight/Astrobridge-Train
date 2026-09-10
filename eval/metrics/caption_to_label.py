@@ -14,11 +14,27 @@ generations are inspected.
 """
 from __future__ import annotations
 
+import re
+
 # Synonyms are matched in the order listed; a label's own name is always checked too, implicitly.
+#
+# The `sn <subtype>` / `type <subtype>` entries exist because models emit REAL astronomical
+# subtypes that aren't among the dataset's three labels — the dataset only ever contains
+# `SN Ia`/`SN II`/`SN Ibc`, but a model describing one will happily write "SN IIP" or "SN Ic".
+# Each maps to its parent class here. `SN IIb` is the one genuinely debatable call: despite the
+# "II" in its name it's a stripped-envelope transitional type, grouped with Ibc in BTS-style
+# taxonomies, so that's where it's mapped — deliberately, not by prefix accident.
 SN_TYPE_SYNONYMS: dict[str, list[str]] = {
-    "SN Ia": ["type ia", "ia supernova", "thermonuclear", "white dwarf"],
-    "SN II": ["type ii", "ii supernova", "core-collapse", "hydrogen-rich", "hydrogen rich"],
-    "SN Ibc": ["type ib", "type ic", "type ibc", "ibc supernova", "stripped-envelope", "stripped envelope"],
+    "SN Ia": ["sn ia", "type ia", "ia supernova", "thermonuclear", "white dwarf"],
+    "SN II": [
+        "sn ii", "type ii", "sn iip", "type iip", "sn iil", "type iil", "sn iin", "type iin",
+        "ii supernova", "core-collapse", "hydrogen-rich", "hydrogen rich",
+    ],
+    "SN Ibc": [
+        "sn ibc", "type ibc", "sn ib/c", "type ib/c", "sn ib", "type ib", "sn ic", "type ic",
+        "sn ic-bl", "type ic-bl", "sn iib", "type iib",
+        "ibc supernova", "stripped-envelope", "stripped envelope",
+    ],
 }
 
 GALAXY10_LABEL_SYNONYMS: dict[str, list[str]] = {
@@ -73,12 +89,64 @@ def predict_label_from_code(answer: str, class_codes: dict[str, str]) -> str | N
     substring search (which `"2" in "12"` would wrongly pass). `None` if no valid standalone code
     digit appears at all.
     """
-    import re
-
     match = re.search(r"(?<!\d)([0-9])(?!\d)", answer)
     if match is None:
         return None
     return class_codes.get(match.group(1))
+
+
+_FINAL_ANSWER_RE = re.compile(r"FINAL ANSWER\s*:\s*(.+)", re.IGNORECASE)
+
+
+def _last_longest_match(text: str, label_vocabulary: list[str], synonyms: dict[str, list[str]]) -> str | None:
+    """The label whose name/synonym occurs LATEST in `text`; ties at the same end position go to
+    the LONGEST match. Both rules are load-bearing, not defensive polish:
+
+    - **Latest, not first** (unlike `predict_label`): these are conclusion-style answers, so the
+      final mention is the model's actual verdict. "The early rise resembles a IIP, but the
+      decline is consistent with the SN Ia class" concludes SN Ia — first-match would call it II.
+    - **Longest at a tie**: `"sn ii"` is a strict prefix of `"sn iib"`, so both match at the same
+      position; without the length tie-break, `SN IIb` would silently be read as `SN II` depending
+      on which label happened to be checked first.
+
+    Matches are word-boundary anchored, so `"ia"` inside an unrelated word can't trigger.
+    """
+    lowered = text.lower()
+    best_key: tuple[int, int] | None = None
+    best_label: str | None = None
+    for label in label_vocabulary:
+        for candidate in [label.lower(), *[s.lower() for s in synonyms.get(label, [])]]:
+            for match in re.finditer(rf"\b{re.escape(candidate)}\b", lowered):
+                key = (match.end(), match.end() - match.start())
+                if best_key is None or key > best_key:
+                    best_key, best_label = key, label
+    return best_label
+
+
+def predict_label_from_free_text(
+    answer: str, label_vocabulary: list[str], synonyms: dict[str, list[str]] | None = None,
+) -> str | None:
+    """Parses a deliberately-verbose answer that merely CONTAINS a class, rather than requiring
+    the model to emit nothing but a label. `None` only if no known label or synonym appears at all
+    — counted as wrong/unparsed downstream, never silently dropped.
+
+    Prefers an explicit `FINAL ANSWER: <class>` line when the model produced one, and otherwise
+    reads the class out of the surrounding prose (see `_last_longest_match` for the two matching
+    rules). That dual path is the point: the base model is expected to follow the requested
+    format, while the equipped model tends to revert to the captioning voice it was fine-tuned on
+    — whose real training captions end "...is consistent with the SN Ia class." — so both
+    behaviours parse instead of only the compliant one.
+
+    Falls back to scanning the whole answer if a `FINAL ANSWER` line exists but names nothing
+    recognisable (e.g. "FINAL ANSWER: unclear"), rather than returning `None` while a perfectly
+    good class sits in the prose above it.
+    """
+    match = _FINAL_ANSWER_RE.search(answer)
+    if match is not None:
+        from_final = _last_longest_match(match.group(1), label_vocabulary, synonyms or {})
+        if from_final is not None:
+            return from_final
+    return _last_longest_match(answer, label_vocabulary, synonyms or {})
 
 
 def make_predictor(
@@ -87,19 +155,32 @@ def make_predictor(
     synonyms: dict[str, list[str]] | None = None,
     class_codes: dict[str, str] | None = None,
 ):
-    """Picks `predict_label` or `predict_label_from_code` based on how a collect script actually
-    prompted the model — shared here (not duplicated per runner script) since both
-    `eval/runners/score_image_eval.py` and `eval/runners/score_image_eval_debiased.py` need the
-    exact same logic: using the wrong parser for a given answer format silently returns `None` for
-    every object rather than erroring, so getting this dispatch right matters in more than one
-    place. Kept dataset-agnostic (parameters, not hardcoded Galaxy10 constants) so this also works
-    for the lightcurve/SN-typing track's `SN_TYPE_SYNONYMS`.
+    """Picks the parser matching how a collect script actually prompted the model — shared here
+    (not duplicated per runner script) since several scoring scripts need the exact same logic:
+    using the wrong parser for a given answer format silently returns `None` for every object
+    rather than erroring, so getting this dispatch right matters in more than one place. Kept
+    dataset-agnostic (parameters, not hardcoded Galaxy10 constants) so this works for the
+    lightcurve/SN-typing track's `SN_TYPE_SYNONYMS` too.
+
+    Formats:
+      - `"digit_code"` -> `predict_label_from_code`
+      - `"verbose_class"` -> `predict_label_from_free_text` (deliberately-verbose answers that
+        merely contain a class; prefers a `FINAL ANSWER:` line, else reads the last class named)
+      - anything else, including the `"free_text"` default for files predating the key ->
+        `predict_label` (first-match keyword scan)
+
+    `"verbose_class"` is a separate name from `"free_text"` on purpose rather than replacing it:
+    the two use genuinely different matching rules (last-vs-first match, longest-wins tie-break),
+    so reusing the name would silently re-score every pre-existing free-text file under rules it
+    was never evaluated with.
 
     `answer_format` is expected to be read from the collect file itself (`data.get("answer_format",
-    "free_text")` — older files predate the key and default to free-text matching), not assumed.
+    "free_text")`), not assumed.
     """
     if answer_format == "digit_code":
         if class_codes is None:
             raise ValueError("class_codes is required when answer_format='digit_code'.")
         return lambda answer: predict_label_from_code(answer, class_codes)
+    if answer_format == "verbose_class":
+        return lambda answer: predict_label_from_free_text(answer, label_vocabulary, synonyms)
     return lambda answer: predict_label(answer, label_vocabulary, synonyms)

@@ -81,14 +81,20 @@ LC_OOB_ENABLE_THINKING = False
 # ground-truth transient_caption (TRAIN_HF_PATH above) — a caption-QUALITY check, not a
 # classification-accuracy check: does the model's description of the light curve's actual shape
 # (rise/peak/decline, timescale, band behavior) resemble the real one, regardless of whether it
-# also states the right SN type. Equipped gets the LITERAL trained instruction (configs/model.yaml's
-# "Describe the object shown, using only {modalities}." template, filled in for lightcurve-only via
-# captioner.utils.prompt.human_readable_subset — copied here rather than imported since this
-# playground has no `raw_inputs`-shown-modalities context to derive it from generically), the
-# closest thing to genuinely in-distribution phrasing rather than the novel classification
-# instruction used above. Base gets a natural analog, styled like the reference spectra harness's
-# "Briefly analyze and describe..." prompts.
-LC_DESCRIPTIVE_EQUIPPED_PROMPT = "Describe the object shown, using only a light curve."
+# also states the right SN type.
+#
+# Equipped is DELIBERATELY given a differently-worded instruction from the literal trained
+# template (configs/model.yaml's "Describe the object shown, using only {modalities}."), not that
+# exact phrasing — the risk with using the exact trained wording is that it could just trigger
+# memorized/templated captioning jargon regardless of the actual input (the fixed-instruction
+# fine-tuning risk this whole eval bench exists to probe), which would look like "it works" while
+# actually testing nothing. A semantically-equivalent but differently-phrased instruction is the
+# real test of generalization: if equipped only produces sensible, object-specific output under
+# the exact trained words and reverts to boilerplate the moment the phrasing changes, that itself
+# is a finding (instruction-brittleness), not a null result.
+LC_DESCRIPTIVE_EQUIPPED_PROMPT = (
+    "What does this time-series data tell you about the object's behavior?"
+)
 LC_DESCRIPTIVE_OOB_PROMPT = (
     "Briefly analyze and describe the light curve shown in this image: its brightness evolution "
     "over time (rise, peak, decline), approximate timescale, and what type of transient it "
@@ -101,6 +107,9 @@ LC_DESCRIPTIVE_MAX_NEW_TOKENS = 150
 
 TEST_LIGHTCURVES = [
     ("test_subjects/lightcurve_01.npz", "ZTF18AAHVNDQ", "SN Ia"),
+    ("test_subjects/lightcurve_02.npz", "ZTF18AAILMNV", "SN Ia"),
+    ("test_subjects/lightcurve_03.npz", "ZTF18AAIWZIE", "SN Ia"),
+    ("test_subjects/lightcurve_04.npz", "ZTF18AASPRUI", "SN Ia"),
     ("test_subjects/lightcurve_05.npz", "ZTF18AATLFUS", "SN II"),
 ]
 

@@ -79,6 +79,38 @@ SN_CLASS_CODE_PROMPT = (
     "Light curve class code:"
 )
 
+# --- Free-text classification (the default path) ----------------------------------------------
+# Replaces the digit-code prompt above as the default because real runs showed the digit layer
+# corrupting the measurement rather than reporting it: on a live n=30 run base emitted "2" for
+# 28/30 objects and equipped never emitted "1" once, and the legend-reorder test
+# (eval/lightcurve_prompt_playground.py --reorder-legend) confirmed base kept emitting the SAME
+# DIGIT even after that digit's meaning changed — a symbol bias, not a judgement about the object.
+#
+# The specific reason free text should work HERE even though it failed on the image track (~5-15%
+# parse rate there): the equipped model's own training captions all end by naming the class in a
+# fixed phrase — "...is consistent with the SN Ia class." (confirmed by reading real
+# transient_caption values from BuildNg/astrobridge-transients-dataset). So extracting a class
+# from prose plays directly to what this model was fine-tuned to emit, rather than asking it for
+# an out-of-distribution output format. Galaxy10 had no such trained phrasing to lean on.
+#
+# Both sides get the same prompt. Base is expected to follow the FINAL ANSWER format; equipped is
+# expected to drift into its trained captioning voice instead — and that's fine, because
+# `eval.metrics.caption_to_label.predict_label_from_free_text` accepts either an explicit FINAL
+# ANSWER line or a class named anywhere in the prose. Equipped's "failure to comply" is a parse
+# success by design.
+SN_FREETEXT_PROMPT = (
+    "Analyse this supernova light curve: its total duration, the peak brightness in each band, "
+    "how fast it declines after peak, and any colour evolution between the bands.\n"
+    "Then classify it into exactly one of these classes: SN Ia, SN II, SN Ibc.\n"
+    "Conclude your response with the exact format:\n"
+    "FINAL ANSWER: <class>"
+)
+
+# Deliberately generous, and the same for both sides — the whole point of this path is tolerating
+# a verbose answer that happens to contain a class, rather than forcing a 1-token reply. The
+# digit-code path's tight asymmetric budgets (40/8) existed only to constrain digit emission.
+DEFAULT_FREETEXT_MAX_NEW_TOKENS = 250
+
 # 1=g, 2=r per captioner.data.transients_dataset's module docstring (`atcat_band_id`); 0 is the
 # excluded-i sentinel, always masked out by `atcat_use` below before it's ever plotted.
 _BAND_PLOT_STYLE = {1: {"color": "tab:green", "label": "g-band"}, 2: {"color": "tab:red", "label": "r-band"}}
