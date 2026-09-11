@@ -18,12 +18,12 @@ hf auth login
 ```
 
 Paste a token from https://huggingface.co/settings/tokens when asked. Then request access on
-these three pages (click "Agree", approval isn't always instant):
-- https://huggingface.co/datasets/gapatron/legacy_survey_south_images_captions
+these two pages (click "Agree", approval isn't always instant):
 - https://huggingface.co/polymathic-ai/aion-base
 - https://huggingface.co/Qwen/Qwen3.5-9B
 
-Two more sources are pulled automatically and need no access request — both are public:
+Three more sources are pulled automatically and need no access request — all public:
+- https://huggingface.co/datasets/gapatron/astrobridge-image-captions (images + captions, ~2.4GB)
 - https://huggingface.co/datasets/BuildNg/astrobridge-transients-dataset (ZTF light curves)
 - https://huggingface.co/light-curve/atcat (the light-curve encoder, a ~12MB ONNX model)
 
@@ -55,6 +55,10 @@ python scripts/02_cache_embeddings.py --modality lightcurve --device cpu
 
 That last line encodes the ZTF light curves with ATCAT, which is small enough to run on CPU in
 seconds. AION — the image and spectra encoder — is the one that needs a GPU, below.
+
+`make manifest` is where the ~2.4GB image dataset gets downloaded: captions, coordinates and
+pixel data all live in the same parquet shards, so the first step to touch any of them pays for
+all of it. `make captions` and `make cache` reuse the same HF cache rather than downloading again.
 
 ## 6. Everything below needs a GPU
 
