@@ -11,7 +11,7 @@ Three caption sources, kept deliberately separate:
     for now — objects with spectra but no Gemini caption get no spectra-tier caption at all,
     same asymmetry the image side already has (not every has_image object has a caption_blind
     match either). No fallback to mention_summary decomposition for the rest.
-  - image: gapatron's own pre-vetted caption field, `caption_blind` unless
+  - image: gapatron's own pre-vetted caption field, `caption_fused` unless
     configs/data.yaml's `sources.image.caption_field` says otherwise (data/image_dataset.py) —
     same reasoning as spectra above: pre-vetted, modality-restricted, preferred over decomposing
     text ourselves. Looked up by the image source's own id (`object_id_legacy` on the manifest
@@ -87,7 +87,7 @@ def main() -> None:
     image_captions_df = load_image_captions_table(
         cfg.sources.image.hf_path,
         revision=cfg.sources.image.get("revision"),
-        caption_field=cfg.sources.image.get("caption_field", "caption_blind"),
+        caption_field=cfg.sources.image.get("caption_field", "caption_fused"),
         surveys=list(cfg.sources.image.get("surveys") or []) or None,
     )
     image_caption_by_object = image_captions_df.set_index("object_id")["caption_blind"].to_dict()
@@ -241,7 +241,7 @@ def main() -> None:
             f"({cfg.sources.image.hf_path}), so this should be ~100% — anything less means the "
             "manifest's object_id_legacy has drifted from the image dataset (a stale manifest "
             "against a newer dataset revision), or rows were dropped for having no caption text "
-            f"in {cfg.sources.image.get('caption_field', 'caption_blind')!r}."
+            f"in {cfg.sources.image.get('caption_field', 'caption_fused')!r}."
         )
 
     spectra_caption_match_rate = n_spectra_from_gemini / n_spectra_available if n_spectra_available else None

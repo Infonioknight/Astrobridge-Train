@@ -24,7 +24,7 @@
 #  and stage1/stage2 pick up from their own latest checkpoint (see
 #  src/captioner/train/loop.py). Delete a stamp to force that step to rerun.
 # =============================================================================
-#SBATCH --job-name=astrobridge-pipeline
+#SBATCH --job-name=astrobridge-v5
 #SBATCH --account=bfvh-dtai-gh
 #SBATCH --partition=ghx4
 #SBATCH --nodes=1
@@ -44,7 +44,7 @@ set -euo pipefail
 # The HF Hub repo id to publish to, i.e. everything after huggingface.co/.
 # Defaults to this branch's target (UniverseTBD/astrobridge-model-v4_qwen); override with
 # `sbatch --export=ALL,HF_REPO_ID=...`, or set it empty to run everything but skip the upload.
-HF_REPO_ID="${HF_REPO_ID:-UniverseTBD/astrobridge-model-v4_qwen}"
+HF_REPO_ID="${HF_REPO_ID:-UniverseTBD/astrobridge-model-v5}"
 
 # Publish privately (default) or publicly.
 HF_PUBLIC="${HF_PUBLIC:-0}"
@@ -52,7 +52,7 @@ HF_PUBLIC="${HF_PUBLIC:-0}"
 # -----------------------------------------------------------------------------
 #  Optional knobs
 # -----------------------------------------------------------------------------
-PROJECT_DIR="${PROJECT_DIR:-/u/li26/ondemand/data/sys/dashboard/batch_connect/sys/jupyter-lab/output/Astrobridge-Train}"
+PROJECT_DIR="${PROJECT_DIR:-/work/hdd/bfvh/li26/Astrobridge-Train-v5}"
 VENV_DIR="${VENV_DIR:-$PROJECT_DIR/.venv}"
 PYTHON_MODULE="${PYTHON_MODULE:-python/3.11.9}"
 
@@ -202,8 +202,15 @@ run_step 06e_eval_stage2 python scripts/04_eval.py \
 collect_metrics() {
     cp outputs/checkpoints/stage1/metrics.jsonl "$PUBLISH_FILES/metrics_stage1.jsonl"
     cp outputs/checkpoints/stage2/metrics.jsonl "$PUBLISH_FILES/metrics_stage2.jsonl"
-    cp outputs/eval/groundedness_report.json "$PUBLISH_FILES/groundedness_report.json"
-    cp outputs/eval/groundedness_report_stage1.json "$PUBLISH_FILES/groundedness_report_stage1.json"
+    # Copy only what exists: a bare cp of a missing report aborts the run under `set -e` at
+    # the last step before publishing.
+    for r in groundedness_report.json groundedness_report_stage1.json; do
+        if [[ -f "outputs/eval/$r" ]]; then
+            cp "outputs/eval/$r" "$PUBLISH_FILES/$r"
+        else
+            echo "    (no outputs/eval/$r — skipping)"
+        fi
+    done
     echo "Collected into $PUBLISH_FILES:"
     ls -la "$PUBLISH_FILES"
 }
@@ -234,7 +241,13 @@ run_step 08a_publish python scripts/06_publish_model.py "${PUBLISH_ARGS[@]}"
 # The publish script uploads the adapter + middle.pt + model card. The metrics
 # files aren't part of it, so they go up in a second pass.
 echo "=== [run ] 08b_upload_metrics"
+# `hf upload` raises FileNotFoundError on a missing path, which under `set -e` fails the run
+# AFTER the model itself has already uploaded. Upload only what exists.
 for f in metrics_stage1.jsonl metrics_stage2.jsonl groundedness_report.json groundedness_report_stage1.json; do
+    if [[ ! -f "$PUBLISH_FILES/$f" ]]; then
+        echo "    (no $f — skipping)"
+        continue
+    fi
     echo "    uploading $f"
     hf upload "$HF_REPO_ID" "$PUBLISH_FILES/$f" "$f"
 done

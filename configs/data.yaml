@@ -16,7 +16,13 @@ sources:
     # content across loose *_captions.json files plus a separate legacy_south_all_images.parquet.
     # Public — no access request needed, unlike its predecessor.
     hf_path: gapatron/astrobridge-image-captions
-    revision: null   # read directly from data/train-*.parquet, not via `datasets.load_dataset`
+    # Pinned deliberately for v5. This dataset's caption_fused text was rewritten in place on
+    # 2026-09-10 (commit d9fadc12, "Upload dataset") — all 3,487 objects, same ids, 100% of the
+    # caption text changed — which is what made v4's captions stale and prompted this retrain.
+    # With `revision: null` the next in-place update would silently change what v5 trained on
+    # too. Set back to null to track main again.
+    revision: d9fadc12fa3e2061b5c397b52f0e39bde10a2ec0
+                      # read directly from data/train-*.parquet, not via `datasets.load_dataset`
                       # — see data/image_dataset.py. No `split` here: the repo has only `train`.
     # Which caption stage feeds the image tier. caption_fused is the dataset's own final output:
     # an editor pass that takes the three earlier drafts (blind, properties, literature) as

@@ -5,12 +5,14 @@ split its captions across ~2,410 loose `{object_id}_captions.json` files and its
 separate `legacy_south_all_images.parquet`), everything here lives in one standard
 `datasets`-style parquet dataset under `data/train-*.parquet`.
 
-**Caption source** (`load_image_captions_table`): `caption_blind` by default — the image-only,
-open-ended stage, generated with no literature context and no object name, with the dataset's
-own leak detection already applied. Used directly for the image tier in 01_generate_captions.py
-rather than re-derived via our own keyword decomposition. Three further caption fields exist
-(`caption_properties`, `caption_literature`, `caption_fused`); `caption_field` selects between
-them so switching is a config change, not a code change.
+**Caption source** (`load_image_captions_table`): `caption_fused` by default — the dataset's own
+final editor pass, which takes the three earlier drafts (blind, properties, literature) as
+proposals rather than ground truth and re-examines the pixels to resolve disagreements. The
+no-name/no-designation rule is enforced and re-checked on every stage, so it is no more
+leak-prone than `caption_blind`. Used directly for the image tier in 01_generate_captions.py
+rather than re-derived via our own keyword decomposition. The three earlier stages
+(`caption_blind`, `caption_properties`, `caption_literature`) remain available; `caption_field`
+selects between them so switching is a config change, not a code change.
 
 **Pixel source** (`load_image_flux_identity_table` / `load_image_flux_pixels`): the same parquet,
 via flat per-band columns — `flux_{g,r,i,z}`, `ivar_*`, `mask_*`, `psf_fwhm_*`, `scale_*` — rather
@@ -137,7 +139,7 @@ def load_image_captions_table(
     hf_path: str,
     revision: str | None = None,
     cache_dir: Path | None = None,
-    caption_field: str = "caption_blind",
+    caption_field: str = "caption_fused",
     surveys: Sequence[str] | None = None,
 ) -> pd.DataFrame:
     """One row per object: object_id, caption_blind. The column is always returned under the name
