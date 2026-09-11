@@ -8,11 +8,8 @@ outputs/
 venv/
 .ipynb_checkpoints/
 */.ipynb_checkpoints/
-<<<<<<< HEAD
 logs/*
 !logs/.gitkeep
-=======
 
 RETRAIN_SKETCH.md
 training_example_template.txt
->>>>>>> e967c7e (Chat template, multiple prompts)
