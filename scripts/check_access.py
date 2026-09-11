@@ -42,10 +42,6 @@ def main() -> None:
         f"dataset access: {cfg.sources.image.hf_path}",
         lambda: api.dataset_info(cfg.sources.image.hf_path),
     )
-    results["image caption dataset (repo)"] = _check(
-        f"dataset access: {cfg.sources.image_captions.hf_path}",
-        lambda: api.dataset_info(cfg.sources.image_captions.hf_path),
-    )
 
     def _check_image_files():
         from fnmatch import fnmatch

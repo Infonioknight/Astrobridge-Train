@@ -90,7 +90,10 @@ def main() -> None:
         caption_field=cfg.sources.image.get("caption_field", "caption_fused"),
         surveys=list(cfg.sources.image.get("surveys") or []) or None,
     )
-    image_caption_by_object = image_captions_df.set_index("object_id")["caption"].to_dict()
+    # load_image_captions_table normalises whichever caption_field was selected to the column
+    # name `caption_blind` (see data/image_dataset.py), so the lookup here does not change when
+    # the stage does. train-v2 names that column `caption` instead — do not "fix" this to match.
+    image_caption_by_object = image_captions_df.set_index("object_id")["caption_blind"].to_dict()
 
     # Transients ship their own caption, used RAW here (no keyword veto — see module docstring
     # and RETRAIN_SKETCH.md B3). It is not pre-vetted like caption_fused / the Gemini captions,
