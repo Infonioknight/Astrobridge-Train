@@ -20,7 +20,27 @@ sources:
     # *_captions.json (`caption_blind`); this repo is the same author's superset. Keyed by
     # object_id in the Legacy Survey namespace (matched via object_id_legacy, same as before).
     hf_path: gapatron/astrobridge-image-captions
-    revision: null
+    # Pinned deliberately for v5. This dataset's caption_fused text was rewritten in place on
+    # 2026-09-10 (commit d9fadc12, "Upload dataset") — all 3,487 objects, same ids, 100% of the
+    # caption text changed — which is what made v4's captions stale and prompted this retrain.
+    # With `revision: null` the next in-place update would silently change what v5 trained on
+    # too. Set back to null to track main again.
+    revision: d9fadc12fa3e2061b5c397b52f0e39bde10a2ec0
+                      # read directly from data/train-*.parquet, not via `datasets.load_dataset`
+                      # — see data/image_dataset.py. No `split` here: the repo has only `train`.
+    # Which caption stage feeds the image tier. caption_fused is the dataset's own final output:
+    # an editor pass that takes the three earlier drafts (blind, properties, literature) as
+    # proposals rather than ground truth and re-examines the pixels itself, resolving
+    # disagreements by looking at the image instead of trusting whichever draft sounded most
+    # confident. Same no-name/no-designation rule is enforced and re-checked on every stage, so
+    # it is no more leak-prone than caption_blind. Alternatives: caption_blind (image-only,
+    # open-ended), caption_properties (structured resolvedness/color/structure),
+    # caption_literature (image + capped literature excerpts).
+    caption_field: caption_fused
+    # null/omitted = both surveys. Set to [legacy-south] to reproduce the pre-swap object set
+    # exactly: one cutout size (160x160) and ivar/mask present throughout. legacy-north is
+    # 152x152 with no ivar/mask/i-band — real gaps in that release, handled but worth knowing.
+    surveys: null
   spectra_captions:
     # Teammate-produced, spectrum-grounded LLM captions (Gemini) — the spectra-tier equivalent
     # of gapatron's caption_blind for images. Spectra-tier captions are restricted to just the

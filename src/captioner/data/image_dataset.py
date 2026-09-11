@@ -1,13 +1,14 @@
 """Loaders for the image tier's two data shapes — neither is the `datasets.load_dataset`-with-an-
 `image`-column shape this codebase originally assumed.
 
-**Caption source** (`load_image_captions_table`): `gapatron/astrobridge-image-captions` — parquet
-shards (`data/train-*.parquet`), one row per object with `object_id` plus four caption columns
-(`caption_blind`, `caption_properties`, `caption_literature`, `caption_fused`). We use
-`caption_fused` — the merged caption Gemini produces from the blind + properties + literature
-passes — directly for the image tier in 01_generate_captions.py, not re-derived via our own
-keyword decomposition. The parquet also carries per-band flux, but the pixel/flux source for AION
-stays `legacy_south_all_images.parquet` below, unchanged.
+**Caption source** (`load_image_captions_table`): `caption_fused` by default — the dataset's own
+final editor pass, which takes the three earlier drafts (blind, properties, literature) as
+proposals rather than ground truth and re-examines the pixels to resolve disagreements. The
+no-name/no-designation rule is enforced and re-checked on every stage, so it is no more
+leak-prone than `caption_blind`. Used directly for the image tier in 01_generate_captions.py
+rather than re-derived via our own keyword decomposition. The three earlier stages
+(`caption_blind`, `caption_properties`, `caption_literature`) remain available; `caption_field`
+selects between them so switching is a config change, not a code change.
 
 (Was `gapatron/legacy_survey_south_images_captions`'s per-object `*_captions.json` files with
 `caption_blind`; the new repo is the same author's superset with the fused caption added.)
@@ -35,7 +36,11 @@ IMAGE_CAPTION_COLUMN = "caption_fused"
 
 
 def load_image_captions_table(
-    hf_path: str, revision: str | None = None, cache_dir: Path | None = None
+    hf_path: str,
+    revision: str | None = None,
+    cache_dir: Path | None = None,
+    caption_field: str = "caption_fused",
+    surveys: Sequence[str] | None = None,
 ) -> pd.DataFrame:
     """One row per object: `object_id`, `caption` (from `caption_fused`). Only these two columns
     are read from the parquet shards — the flux columns in the same file are ignored (the AION

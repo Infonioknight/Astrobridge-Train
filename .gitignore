@@ -8,6 +8,8 @@ outputs/
 venv/
 .ipynb_checkpoints/
 */.ipynb_checkpoints/
+logs/*
+!logs/.gitkeep
 
 RETRAIN_SKETCH.md
 training_example_template.txt

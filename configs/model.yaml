@@ -50,7 +50,7 @@ llm:
 
 prompt:
   # Chat-template training example — see training_example_template.txt and RETRAIN_SKETCH.md.
-  # The 48 Q-Former vectors are spliced into the embedding sequence between `wrapper_pre` and
+  # The 64 Q-Former vectors are spliced into the embedding sequence between `wrapper_pre` and
   # `wrapper_post` (i.e. INSIDE the user turn, at <observation>), and loss is computed only on
   # the assistant caption. A `{system}` prompt and an `{instruction}` are sampled per training
   # example from the lists below (seeded per (object_id, epoch) in data/dataset.py) so the model
