@@ -26,15 +26,29 @@
 # =============================================================================
 #SBATCH --job-name=astrobridge-v5
 #SBATCH --account=bfvh-dtai-gh
-#SBATCH --partition=ghx4
+#SBATCH --partition=ghx4-interactive
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
-#SBATCH --gpus-per-node=1
-#SBATCH --mem=100g
-#SBATCH --time=48:00:00
+#SBATCH --cpus-per-task=64
+#SBATCH --gpus-per-node=4
+#SBATCH --mem=240g
+#SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
+#
+#  ALLOCATION: 4 GPUs on ghx4-interactive. That partition caps walltime at 2h (MaxTime
+#  02:00:00), which is the binding constraint here, not the GPU count. Reference from the
+#  1-GPU v4 run: 3h11m end to end — stage1 1h44m, stage2 26m, and the two groundedness evals
+#  27m each. stage1/stage2 shard across GPUs via accelerate (num_processes is set from
+#  `nvidia-smi -L` below), so on 4 GPUs they should fall to roughly 30m and 7m; the evals do
+#  NOT shard and stay ~27m each. That puts the full pipeline near 1h40m — inside 2h, but not
+#  by much, and the two evals are over half of what is left.
+#
+#  If it does hit the wall: run_step stamps in outputs/.slurm_stamps make a resubmit resume at
+#  STAGE granularity, so completed stages are skipped. Note the granularity is the stage, not
+#  the epoch — a timeout part-way through stage1 loses that stage's progress. Submitting with
+#  --export=ALL,SKIP_EVAL=1 drops both groundedness gates and brings the run comfortably inside
+#  the cap, at the cost of the groundedness report in the model card.
 
 set -euo pipefail
 
