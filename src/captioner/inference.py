@@ -136,6 +136,49 @@ def load_inference_model_from_hub(
     return model, tokenizer, encoders
 
 
+def _build_modality_batch(
+    encoders: dict,
+    modality_out_dims: dict[str, int],
+    modality_max_tokens: dict[str, int],
+    raw_inputs: dict[str, dict[str, Any]],
+    device: str,
+) -> dict[str, dict[str, torch.Tensor]]:
+    """Shared by `generate_caption` and `score_completions` so both build the exact same
+    modality batch from the same `raw_inputs` — a modality absent from `raw_inputs` is true
+    exclusion (all-True mask), never a zero-content placeholder (§6).
+    """
+    modality_batch: dict[str, dict[str, torch.Tensor]] = {}
+    for name, out_dim in modality_out_dims.items():
+        T_m = modality_max_tokens[name]
+        tokens = torch.zeros((1, T_m, out_dim), dtype=torch.float32, device=device)
+        mask = torch.ones((1, T_m), dtype=torch.bool, device=device)  # True = pad/absent by default
+        if name in raw_inputs:
+            # AION's real token count depends on the actual input (image pixel dims / spectrum
+            # length), not just the `num_encoder_tokens` the encoder was built with — confirmed
+            # real, not a bug in the encoder: a 384x384 image or a ~7800-sample spectrum can both
+            # produce fewer raw tokens than max_tokens. data/collate.py already pads/truncates to
+            # max_tokens per-object during training for exactly this reason; mirror that here
+            # instead of requiring an exact match (which training never assumed either).
+            raw_tokens = encoders[name].encode(raw_inputs[name]).to(torch.float32)  # (1, T_raw, out_dim)
+            n = min(raw_tokens.shape[1], T_m)
+            tokens[:, :n] = raw_tokens[:, :n].to(device)
+            mask[:, :n] = False
+        modality_batch[name] = {"tokens": tokens, "mask": mask}
+    return modality_batch
+
+
+def _resolve_system_instruction(prompt_cfg, shown: frozenset[str], question: str | None, system: str | None) -> tuple[str, str]:
+    """The deterministic default `generate_caption`/`score_completions` both pin: training
+    samples across every `system_variants`/`instruction_variants` entry, inference always pins
+    the first of each unless the caller overrides.
+    """
+    system = system if system is not None else str(prompt_cfg.system_variants[0])
+    instruction = question if question is not None else str(prompt_cfg.instruction_variants[0])
+    if "{modalities}" in instruction:
+        instruction = instruction.format(modalities=human_readable_subset(shown))
+    return system, instruction
+
+
 @torch.no_grad()
 def generate_caption(
     model: Captioner,
@@ -170,28 +213,9 @@ def generate_caption(
         raise ValueError("raw_inputs is empty — at least one modality must be provided.")
 
     shown = frozenset(raw_inputs.keys())
-    modality_batch: dict[str, dict[str, torch.Tensor]] = {}
-    for name, out_dim in modality_out_dims.items():
-        T_m = modality_max_tokens[name]
-        tokens = torch.zeros((1, T_m, out_dim), dtype=torch.float32, device=device)
-        mask = torch.ones((1, T_m), dtype=torch.bool, device=device)  # True = pad/absent by default
-        if name in raw_inputs:
-            # AION's real token count depends on the actual input (image pixel dims / spectrum
-            # length), not just the `num_encoder_tokens` the encoder was built with — confirmed
-            # real, not a bug in the encoder: a 384x384 image or a ~7800-sample spectrum can both
-            # produce fewer raw tokens than max_tokens. data/collate.py already pads/truncates to
-            # max_tokens per-object during training for exactly this reason; mirror that here
-            # instead of requiring an exact match (which training never assumed either).
-            raw_tokens = encoders[name].encode(raw_inputs[name]).to(torch.float32)  # (1, T_raw, out_dim)
-            n = min(raw_tokens.shape[1], T_m)
-            tokens[:, :n] = raw_tokens[:, :n].to(device)
-            mask[:, :n] = False
-        modality_batch[name] = {"tokens": tokens, "mask": mask}
+    modality_batch = _build_modality_batch(encoders, modality_out_dims, modality_max_tokens, raw_inputs, device)
 
-    system = system if system is not None else str(prompt_cfg.system_variants[0])
-    instruction = question if question is not None else str(prompt_cfg.instruction_variants[0])
-    if "{modalities}" in instruction:
-        instruction = instruction.format(modalities=human_readable_subset(shown))
+    system, instruction = _resolve_system_instruction(prompt_cfg, shown, question, system)
     pre_text, post_text = build_wrapper_text(prompt_cfg, system, instruction)
     pre_ids = tokenizer(pre_text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(device)
     post_ids = tokenizer(post_text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(device)
@@ -209,6 +233,67 @@ def generate_caption(
             do_sample=False,
         )
     return tokenizer.batch_decode(gen, skip_special_tokens=True)[0]
+
+
+@torch.no_grad()
+def score_completions(
+    model: Captioner,
+    tokenizer,
+    encoders: dict,
+    modality_out_dims: dict[str, int],
+    modality_max_tokens: dict[str, int],
+    prompt_cfg,
+    device: str,
+    raw_inputs: dict[str, dict[str, Any]],
+    candidates: list[str],
+    question: str | None = None,
+    system: str | None = None,
+    reasoning: str = "",
+) -> dict[str, float]:
+    """Deterministic classification without asking the model to emit a label at all: scores each
+    of `candidates` (fixed strings, e.g. `[" SN Ia", " SN II", " SN Ibc"]`) as a teacher-forced
+    continuation of the same chat-template prompt `generate_caption` would build, and returns each
+    candidate's length-normalised mean log-prob. Argmax over a fixed candidate set is always a
+    valid label by construction — no parsing, no unparseable output, fully deterministic given the
+    same weights.
+
+    `reasoning`: free-form text (typically produced by a prior `generate_caption(..., question=
+    the same `question`)` call) appended to the end of `post_text`, i.e. inside the assistant
+    turn, before the candidate is scored as its continuation — this is what lets the model reason
+    about the observation before being scored on the label, without the reasoning itself counting
+    toward any candidate's score.
+
+    Reuses `Captioner.forward`'s existing teacher-forcing contract unchanged: it already returns
+    HF's mean cross-entropy over exactly the target span (`caption_ids`), so `-loss` is already the
+    length-normalised mean log-prob of the candidate — the same reason this avoids penalising a
+    multi-token candidate (e.g. `" SN Ibc"`, 3 tokens) against a shorter one (`" SN Ia"`, 2 tokens).
+    """
+    if not raw_inputs:
+        raise ValueError("raw_inputs is empty — at least one modality must be provided.")
+    if not candidates:
+        raise ValueError("candidates is empty — nothing to score.")
+
+    shown = frozenset(raw_inputs.keys())
+    modality_batch = _build_modality_batch(encoders, modality_out_dims, modality_max_tokens, raw_inputs, device)
+
+    system, instruction = _resolve_system_instruction(prompt_cfg, shown, question, system)
+    pre_text, post_text = build_wrapper_text(prompt_cfg, system, instruction)
+    post_text = post_text + reasoning
+    caption_suffix = str(prompt_cfg.caption_suffix)
+
+    pre_ids = tokenizer(pre_text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(device)
+    post_ids = tokenizer(post_text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(device)
+
+    device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+    scores: dict[str, float] = {}
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        for candidate in candidates:
+            caption_ids = tokenizer(
+                candidate + caption_suffix, add_special_tokens=False, return_tensors="pt",
+            )["input_ids"].to(device)
+            outputs = model(modality_batch, pre_ids, post_ids, caption_ids)
+            scores[candidate] = -float(outputs.loss.item())
+    return scores
 
 
 def load_qwen_native_vision_model(cfg: DictConfig, device: str = "cuda"):
@@ -289,3 +374,66 @@ def generate_qwen_native_vision_answer(
         gen = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
 
     return processor.decode(gen[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
+
+
+@torch.no_grad()
+def score_completions_qwen_native(
+    model, processor, device: str, question: str, image, candidates: list[str],
+    reasoning: str = "", enable_thinking: bool | None = False,
+) -> dict[str, float]:
+    """Base-side counterpart to `score_completions`: scores each of `candidates` as a
+    teacher-forced continuation of Qwen's own chat template, with `reasoning` (typically a prior
+    `generate_qwen_native_vision_answer(..., question)` call's output) preceding the candidate in
+    the assistant's turn — the model reasons freely, then is scored on the label alone, without
+    the reasoning itself counting toward any candidate's score.
+
+    Each candidate's full sequence (context + reasoning + candidate) is built via one fresh
+    `apply_chat_template(..., continue_final_message=True)` call, not by manually concatenating
+    token ids onto an already-tokenized context: `Qwen3_5ForConditionalGeneration.forward`
+    recomputes 3D (mRoPE) position ids from `input_ids`/`attention_mask`/the image-grid tensors
+    every call (confirmed live — hand-splicing extra ids onto a previously tokenized+forwarded
+    context raises `IndexError` deep inside `get_rope_index`, a real shape mismatch, not a
+    theoretical concern), so every forward pass here gets a self-consistently retokenized sequence
+    instead. `SN_CANDIDATES`'s leading space (`" SN Ia"`, not `"SN Ia"`) is what makes this safe
+    from the BPE-boundary issue that hand-splicing was meant to avoid — a leading-space token is a
+    clean BPE boundary regardless of what precedes it, so retokenizing the joined text still
+    produces the same trailing token count as tokenizing the candidate alone.
+
+    `enable_thinking` defaults to `False` here (unlike `generate_qwen_native_vision_answer`,
+    which defaults to `None`/thinking-on): scoring a fixed candidate as the very next tokens after
+    `reasoning` only makes sense if the template isn't about to reopen an empty `<think>` block in
+    between, so the "genuinely out of the box" default doesn't apply to this function.
+    """
+    if not candidates:
+        raise ValueError("candidates is empty — nothing to score.")
+
+    chat_template_kwargs = {} if enable_thinking is None else {"enable_thinking": enable_thinking}
+
+    def _tokenize_assistant_turn(text: str):
+        messages = [
+            {"role": "user", "content": [{"type": "image", "image": image}, {"type": "text", "text": question}]},
+            {"role": "assistant", "content": [{"type": "text", "text": text}]},
+        ]
+        return processor.apply_chat_template(
+            messages, continue_final_message=True, tokenize=True, return_dict=True, return_tensors="pt",
+            **chat_template_kwargs,
+        ).to(device)
+
+    n_context = _tokenize_assistant_turn(reasoning)["input_ids"].shape[1]
+
+    device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+    scores: dict[str, float] = {}
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        for candidate in candidates:
+            full_inputs = _tokenize_assistant_turn(reasoning + candidate)
+            input_ids = full_inputs["input_ids"]
+            candidate_ids = input_ids[:, n_context:]
+            model_kwargs = {k: v for k, v in full_inputs.items() if k != "input_ids"}
+            outputs = model(input_ids=input_ids, **model_kwargs)
+            # logits at position i predict token i+1: positions [n_context-1, end-1) predict the
+            # candidate span [n_context, end).
+            candidate_logits = outputs.logits[:, n_context - 1:-1, :]
+            log_probs = torch.log_softmax(candidate_logits.float(), dim=-1)
+            token_log_probs = log_probs.gather(-1, candidate_ids.unsqueeze(-1)).squeeze(-1)
+            scores[candidate] = float(token_log_probs.mean().item())
+    return scores

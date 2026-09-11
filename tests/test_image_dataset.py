@@ -46,16 +46,14 @@ def test_caption_fused_column_is_returned_as_caption(_patch_hub):
     assert dict(zip(df["object_id"], df["caption"])) == {"a": "A compact source.", "b": "An extended disk."}
 
 
-def test_rows_missing_caption_are_dropped(tmp_path):
-    path = tmp_path / "train-00000.parquet"
-    # Populated on caption_fused: that is the default caption_field, and this test is about
-    # dropping rows with no caption text, not about which stage supplies it.
-    _write_dataset(path, [
-        {"object_id": "a", "caption_fused": "A galaxy."},
-        {"object_id": "b", "caption_fused": None},
-    ])
-    with _patch_shards(path):
-        df = load_image_captions_table("irrelevant/repo")
+def test_rows_missing_caption_are_dropped(_patch_hub):
+    _patch_hub({
+        "data/train-00000-of-00001.parquet": [
+            {"object_id": "a", IMAGE_CAPTION_COLUMN: "A galaxy."},
+            {"object_id": "b", IMAGE_CAPTION_COLUMN: None},
+        ],
+    })
+    df = load_image_captions_table("irrelevant/repo")
 
     assert list(df["object_id"]) == ["a"]
 

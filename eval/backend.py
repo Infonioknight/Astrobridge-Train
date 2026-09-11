@@ -31,8 +31,6 @@ invocation only. Turning that caption into a predicted class belongs to
 `eval/metrics/caption_to_label.py` — this is also what lets a future caption-quality eval reuse
 this file completely unchanged.
 """
-from __future__ import annotations
-
 import gc
 from dataclasses import dataclass
 from typing import Callable, Literal
@@ -49,10 +47,31 @@ class EvalBackend:
     """
 
     side: Side
-    _generate: Callable[[dict, str, int], str]
+    _generate: Callable[[dict, str, int, str | None], str]
+    _classify: Callable[[dict, str, list[str], int], dict] | None = None
 
-    def generate(self, raw_inputs: dict, question: str, max_new_tokens: int = 128) -> str:
-        return self._generate(raw_inputs, question, max_new_tokens)
+    def generate(self, raw_inputs: dict, question: str, max_new_tokens: int = 128, system: str | None = None) -> str:
+        """`system`: only meaningful for `side="equipped"` (overrides `configs/model.yaml`'s
+        `prompt.system_variants[0]` default — see `captioner.inference.generate_caption`'s
+        `system` param). Silently ignored on `side="base"`, which has no equivalent concept —
+        Qwen's own native chat template doesn't expose a system-prompt override through
+        `generate_qwen_native_vision_answer`.
+        """
+        return self._generate(raw_inputs, question, max_new_tokens, system)
+
+    def classify(
+        self, raw_inputs: dict, context: str, candidates: list[str], max_reasoning_tokens: int = 150,
+    ) -> dict:
+        """Deterministic classification: generates free-form reasoning against `context`, then
+        scores each of `candidates` as its teacher-forced continuation and returns
+        `{"reasoning": str, "logprobs": {candidate: float}}` — argmax over `logprobs` is always
+        one of `candidates` by construction, no parsing involved. See
+        `captioner.inference.score_completions`/`score_completions_qwen_native`'s docstrings for
+        the mechanism on each side.
+        """
+        if self._classify is None:
+            raise NotImplementedError(f"classify() is not wired for side={self.side!r} backend.")
+        return self._classify(raw_inputs, context, candidates, max_reasoning_tokens)
 
 
 def get_backend(
@@ -77,7 +96,10 @@ def get_backend(
             side, cfg, repo_id=repo_id, device=device, modality_names=modality_names, enable_thinking=enable_thinking,
         )
     if kind == "modal":
-        return _modal_backend(side, modal_app_name=modal_app_name, enable_thinking=enable_thinking)
+        return _modal_backend(
+            side, modal_app_name=modal_app_name, repo_id=repo_id, modality_names=modality_names,
+            enable_thinking=enable_thinking,
+        )
     raise ValueError(f"kind={kind!r} not recognised — expected 'local' or 'modal'.")
 
 
@@ -98,6 +120,8 @@ def _local_backend(
         generate_qwen_native_vision_answer,
         load_inference_model_from_hub,
         load_qwen_native_vision_model,
+        score_completions,
+        score_completions_qwen_native,
     )
 
     if side == "equipped":
@@ -109,18 +133,29 @@ def _local_backend(
         out_dims = {n: int(c.out_dim) for n, c in cfg.modalities.items()}
         max_tokens = {n: int(c.max_tokens) for n, c in cfg.modalities.items()}
 
-        def _generate(raw_inputs: dict, question: str, max_new_tokens: int) -> str:
+        def _generate(raw_inputs: dict, question: str, max_new_tokens: int, system: str | None = None) -> str:
             return generate_caption(
-                model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt.template, device,
-                raw_inputs, max_new_tokens=max_new_tokens, question=question,
+                model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt, device,
+                raw_inputs, max_new_tokens=max_new_tokens, question=question, system=system,
             )
 
-        return EvalBackend(side="equipped", _generate=_generate)
+        def _classify(raw_inputs: dict, context: str, candidates: list[str], max_reasoning_tokens: int) -> dict:
+            reasoning = generate_caption(
+                model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt, device,
+                raw_inputs, max_new_tokens=max_reasoning_tokens, question=context,
+            )
+            logprobs = score_completions(
+                model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt, device,
+                raw_inputs, candidates, question=context, reasoning=reasoning,
+            )
+            return {"reasoning": reasoning, "logprobs": logprobs}
+
+        return EvalBackend(side="equipped", _generate=_generate, _classify=_classify)
 
     # side == "base"
     vision_model, processor = load_qwen_native_vision_model(cfg, device=device)
 
-    def _generate(raw_inputs: dict, question: str, max_new_tokens: int) -> str:
+    def _generate(raw_inputs: dict, question: str, max_new_tokens: int, system: str | None = None) -> str:
         if "image" not in raw_inputs or len(raw_inputs) != 1:
             raise KeyError(
                 f"base backend only ever consumes {{'image': <PIL.Image>}} — got keys "
@@ -131,7 +166,22 @@ def _local_backend(
             enable_thinking=enable_thinking,
         )
 
-    return EvalBackend(side="base", _generate=_generate)
+    def _classify(raw_inputs: dict, context: str, candidates: list[str], max_reasoning_tokens: int) -> dict:
+        if "image" not in raw_inputs or len(raw_inputs) != 1:
+            raise KeyError(
+                f"base backend only ever consumes {{'image': <PIL.Image>}} — got keys {list(raw_inputs)}."
+            )
+        image = raw_inputs["image"]
+        reasoning = generate_qwen_native_vision_answer(
+            vision_model, processor, device, context, image, max_new_tokens=max_reasoning_tokens,
+            enable_thinking=False,
+        )
+        logprobs = score_completions_qwen_native(
+            vision_model, processor, device, context, image, candidates, reasoning=reasoning,
+        )
+        return {"reasoning": reasoning, "logprobs": logprobs}
+
+    return EvalBackend(side="base", _generate=_generate, _classify=_classify)
 
 
 def free_local_backend(backend: EvalBackend) -> None:
@@ -144,6 +194,7 @@ def free_local_backend(backend: EvalBackend) -> None:
     import torch
 
     del backend._generate
+    backend._classify = None
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -178,121 +229,198 @@ app = modal.App("astrobridge-eval-backend")
 
 hf_cache_volume = modal.Volume.from_name("astrobridge-hf-cache", create_if_missing=True)
 
-# TODO: still needs a real published Gemma-4/next-generation repo id if this ever targets
-# anything other than the current Qwen-based model. For now this is deliberately the real,
-# confirmed-live published repo: UniverseTBD/astrobridge-model-v3_qwen (adapter_config.json +
-# adapter_model.safetensors + middle.pt confirmed present on HF Hub).
-DEFAULT_MODEL_REPO_ID = "UniverseTBD/astrobridge-model-v3_qwen"
+# Real, confirmed-live published repo. Bumped to v5 (image + spectra + lightcurve, 64-query
+# Q-Former, chat-template prompting) from the earlier v3_qwen default.
+DEFAULT_MODEL_REPO_ID = "UniverseTBD/astrobridge-model-v5"
+
+# A100, not L4 — bumped per explicit request for faster real eval runs.
+_MODAL_GPU_KW = {"gpu": "A100"}
 
 
-@app.function(
-    gpu="L4",
+_MODAL_CLS_KW = dict(
     cpu=2.0,
     memory=16384,
     image=modal_image,
     secrets=[modal.Secret.from_name("huggingface-secret")],
     volumes={"/root/.cache/huggingface": hf_cache_volume},
     timeout=1800,
+    scaledown_window=300,  # keep a container warm for 5 min of idle time between calls in a run
+    **_MODAL_GPU_KW,
 )
-def _equipped_infer(
-    raw_inputs_serialized: dict,
-    question: str,
-    repo_id: str = DEFAULT_MODEL_REPO_ID,
-    modality_names: list[str] | None = None,
-    max_new_tokens: int = 128,
-) -> str:
-    """Runs entirely inside the remote container. `raw_inputs_serialized` must already be in the
-    shape `generate_caption` expects (torch tensors / lists — Modal serializes these directly via
-    cloudpickle, no manual bytes-encoding needed for this eval use case, unlike modal_app.py's
-    CLI which had to accept raw file bytes from a terminal).
+
+
+@app.cls(**_MODAL_CLS_KW)
+class _EquippedModel:
+    """Warm-container equivalent of the old `_equipped_infer`/`_equipped_classify` functions: the
+    model loads once in `@modal.enter()` when the container starts, then every `.infer.remote(...)`
+    /`.classify.remote(...)` call against the SAME `(repo_id, modality_names)` pair reuses that
+    already-loaded model — the model is NOT reloaded per object. Confirmed real, not a style
+    preference: a live run collecting 45 objects timed out after 28+ minutes still on the base
+    side under the old per-call-reload design, because each of the ~90 total calls (45 objects x 2
+    sides) reloaded the full model from scratch.
+
+    `repo_id`/`modality_names_json` are `modal.parameter()`s, not plain constructor args — Modal
+    keys warm containers by their exact parameter values, so calling with a different repo_id/
+    modality set gets its own container rather than silently reusing one loaded for a different
+    model. `modality_names` is JSON-encoded because `modal.parameter()` only supports simple
+    scalar types, not `list[str] | None`.
     """
-    import torch
 
-    from captioner.inference import generate_caption, load_inference_model_from_hub
-    from captioner.utils.config import load_config
+    repo_id: str = modal.parameter(default=DEFAULT_MODEL_REPO_ID)
+    modality_names_json: str = modal.parameter(default="")
 
-    cfg = load_config("base", "data", "modalities", "model", "stage2")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    @modal.enter()
+    def load(self):
+        import json
 
-    model, tokenizer, encoders = load_inference_model_from_hub(
-        cfg, repo_id, device=device, modality_names=modality_names,
-    )
-    hf_cache_volume.commit()
+        import torch
 
-    out_dims = {n: int(c.out_dim) for n, c in cfg.modalities.items()}
-    max_tokens = {n: int(c.max_tokens) for n, c in cfg.modalities.items()}
-    return generate_caption(
-        model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt.template, device,
-        raw_inputs_serialized, max_new_tokens=max_new_tokens, question=question,
-    )
+        from captioner.inference import load_inference_model_from_hub
+        from captioner.utils.config import load_config
+
+        self.cfg = load_config("base", "data", "modalities", "model", "stage2")
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        modality_names = json.loads(self.modality_names_json) if self.modality_names_json else None
+
+        self.model, self.tokenizer, self.encoders = load_inference_model_from_hub(
+            self.cfg, self.repo_id, device=self.device, modality_names=modality_names,
+        )
+        hf_cache_volume.commit()
+        self.out_dims = {n: int(c.out_dim) for n, c in self.cfg.modalities.items()}
+        self.max_tokens = {n: int(c.max_tokens) for n, c in self.cfg.modalities.items()}
+
+    @modal.method()
+    def infer(self, raw_inputs_serialized: dict, question: str, max_new_tokens: int = 128, system: str | None = None) -> str:
+        from captioner.inference import generate_caption
+
+        return generate_caption(
+            self.model, self.tokenizer, self.encoders, self.out_dims, self.max_tokens, self.cfg.prompt,
+            self.device, raw_inputs_serialized, max_new_tokens=max_new_tokens, question=question, system=system,
+        )
+
+    @modal.method()
+    def classify(
+        self, raw_inputs_serialized: dict, context: str, candidates: list[str], max_reasoning_tokens: int = 150,
+    ) -> dict:
+        from captioner.inference import generate_caption, score_completions
+
+        reasoning = generate_caption(
+            self.model, self.tokenizer, self.encoders, self.out_dims, self.max_tokens, self.cfg.prompt,
+            self.device, raw_inputs_serialized, max_new_tokens=max_reasoning_tokens, question=context,
+        )
+        logprobs = score_completions(
+            self.model, self.tokenizer, self.encoders, self.out_dims, self.max_tokens, self.cfg.prompt,
+            self.device, raw_inputs_serialized, candidates, question=context, reasoning=reasoning,
+        )
+        return {"reasoning": reasoning, "logprobs": logprobs}
 
 
-@app.function(
-    gpu="L4",
-    cpu=2.0,
-    memory=16384,
-    image=modal_image,
-    secrets=[modal.Secret.from_name("huggingface-secret")],
-    volumes={"/root/.cache/huggingface": hf_cache_volume},
-    timeout=1800,
-)
-def _base_infer(image_bytes: bytes, question: str, max_new_tokens: int = 128, enable_thinking: bool | None = None) -> str:
-    """`image_bytes`: a PNG/JPEG-encoded picture, not raw pixel_values — the base model's native
-    vision pathway consumes an ordinary image, decoded here inside the remote container.
-    `enable_thinking`: see `generate_qwen_native_vision_answer`'s docstring.
+@app.cls(**_MODAL_CLS_KW)
+class _BaseModel:
+    """Warm-container equivalent of the old `_base_infer`/`_base_classify` functions — see
+    `_EquippedModel`'s docstring for why this matters. No parameters: this side is always the same
+    plain, never-LoRA'd Qwen3.5-9B regardless of which equipped repo is under test.
     """
-    import io
 
-    import torch
-    from PIL import Image
+    @modal.enter()
+    def load(self):
+        import torch
 
-    from captioner.inference import generate_qwen_native_vision_answer, load_qwen_native_vision_model
-    from captioner.utils.config import load_config
+        from captioner.inference import load_qwen_native_vision_model
+        from captioner.utils.config import load_config
 
-    cfg = load_config("base", "data", "modalities", "model", "stage2")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.cfg = load_config("base", "data", "modalities", "model", "stage2")
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.vision_model, self.processor = load_qwen_native_vision_model(self.cfg, device=self.device)
+        hf_cache_volume.commit()
 
-    vision_model, processor = load_qwen_native_vision_model(cfg, device=device)
-    hf_cache_volume.commit()
+    @modal.method()
+    def infer(self, image_bytes: bytes, question: str, max_new_tokens: int = 128, enable_thinking: bool | None = None) -> str:
+        import io
 
-    image = Image.open(io.BytesIO(image_bytes))
-    return generate_qwen_native_vision_answer(
-        vision_model, processor, device, question, image, max_new_tokens=max_new_tokens,
-        enable_thinking=enable_thinking,
-    )
+        from PIL import Image
+
+        from captioner.inference import generate_qwen_native_vision_answer
+
+        image = Image.open(io.BytesIO(image_bytes))
+        return generate_qwen_native_vision_answer(
+            self.vision_model, self.processor, self.device, question, image, max_new_tokens=max_new_tokens,
+            enable_thinking=enable_thinking,
+        )
+
+    @modal.method()
+    def classify(self, image_bytes: bytes, context: str, candidates: list[str], max_reasoning_tokens: int = 150) -> dict:
+        """`enable_thinking=False` for the reasoning step too (not just scoring) — see
+        `score_completions_qwen_native`'s docstring for why an open `<think>` block breaks the
+        "reasoning immediately followed by a scored candidate" contract this depends on.
+        """
+        import io
+
+        from PIL import Image
+
+        from captioner.inference import generate_qwen_native_vision_answer, score_completions_qwen_native
+
+        image = Image.open(io.BytesIO(image_bytes))
+        reasoning = generate_qwen_native_vision_answer(
+            self.vision_model, self.processor, self.device, context, image, max_new_tokens=max_reasoning_tokens,
+            enable_thinking=False,
+        )
+        logprobs = score_completions_qwen_native(
+            self.vision_model, self.processor, self.device, context, image, candidates, reasoning=reasoning,
+        )
+        return {"reasoning": reasoning, "logprobs": logprobs}
 
 
-def _modal_backend(side: Side, *, modal_app_name: str, enable_thinking: bool | None = None) -> EvalBackend:
-    """Talks to an already-`modal deploy`ed app — never defines `@app.function` itself (that
-    lives above, once, shared by every runner). `modal deploy eval/backend.py` must have been
-    run at least once before this works; see the module-level TODO/verification note above.
-    Redeploy again after any change to `_equipped_infer`/`_base_infer` (including a new parameter
-    like `enable_thinking`) — a running deployment keeps serving whatever code it was deployed
-    with until `modal deploy` is re-run.
+def _modal_backend(
+    side: Side, *, modal_app_name: str, repo_id: str | None = None, modality_names: list[str] | None = None,
+    enable_thinking: bool | None = None,
+) -> EvalBackend:
+    """Talks to an already-`modal deploy`ed app — never defines `@app.cls` itself (that lives
+    above, once, shared by every runner). `modal deploy eval/backend.py` must have been run at
+    least once before this works. Redeploy again after any change to `_EquippedModel`/`_BaseModel`
+    — a running deployment keeps serving whatever code it was deployed with until `modal deploy`
+    is re-run.
     """
+    import json
+
     if side == "equipped":
-        fn = modal.Function.from_name(modal_app_name, "_equipped_infer")
+        cls = modal.Cls.from_name(modal_app_name, "_EquippedModel")
+        instance = cls(
+            repo_id=repo_id or DEFAULT_MODEL_REPO_ID,
+            modality_names_json=json.dumps(modality_names) if modality_names is not None else "",
+        )
 
-        def _generate(raw_inputs: dict, question: str, max_new_tokens: int) -> str:
-            return fn.remote(raw_inputs_serialized=raw_inputs, question=question, max_new_tokens=max_new_tokens)
+        def _generate(raw_inputs: dict, question: str, max_new_tokens: int, system: str | None = None) -> str:
+            return instance.infer.remote(raw_inputs, question, max_new_tokens, system)
 
-        return EvalBackend(side="equipped", _generate=_generate)
+        def _classify(raw_inputs: dict, context: str, candidates: list[str], max_reasoning_tokens: int) -> dict:
+            return instance.classify.remote(raw_inputs, context, candidates, max_reasoning_tokens)
 
-    fn = modal.Function.from_name(modal_app_name, "_base_infer")
+        return EvalBackend(side="equipped", _generate=_generate, _classify=_classify)
 
-    def _generate(raw_inputs: dict, question: str, max_new_tokens: int) -> str:
+    cls = modal.Cls.from_name(modal_app_name, "_BaseModel")
+    instance = cls()
+
+    def _to_png_bytes(image) -> bytes:
+        import io
+
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _generate(raw_inputs: dict, question: str, max_new_tokens: int, system: str | None = None) -> str:
         if "image" not in raw_inputs or len(raw_inputs) != 1:
             raise KeyError(
                 f"base backend only ever consumes {{'image': <PIL.Image>}} — got keys "
                 f"{list(raw_inputs)}."
             )
-        import io
+        return instance.infer.remote(_to_png_bytes(raw_inputs["image"]), question, max_new_tokens, enable_thinking)
 
-        buf = io.BytesIO()
-        raw_inputs["image"].save(buf, format="PNG")
-        return fn.remote(
-            image_bytes=buf.getvalue(), question=question, max_new_tokens=max_new_tokens,
-            enable_thinking=enable_thinking,
-        )
+    def _classify(raw_inputs: dict, context: str, candidates: list[str], max_reasoning_tokens: int) -> dict:
+        if "image" not in raw_inputs or len(raw_inputs) != 1:
+            raise KeyError(
+                f"base backend only ever consumes {{'image': <PIL.Image>}} — got keys {list(raw_inputs)}."
+            )
+        return instance.classify.remote(_to_png_bytes(raw_inputs["image"]), context, candidates, max_reasoning_tokens)
 
-    return EvalBackend(side="base", _generate=_generate)
+    return EvalBackend(side="base", _generate=_generate, _classify=_classify)
