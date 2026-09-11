@@ -67,7 +67,14 @@ HF_PUBLIC="${HF_PUBLIC:-0}"
 #  Optional knobs
 # -----------------------------------------------------------------------------
 PROJECT_DIR="${PROJECT_DIR:-/work/hdd/bfvh/li26/Astrobridge-Train-v5}"
-VENV_DIR="${VENV_DIR:-$PROJECT_DIR/.venv}"
+# The venv goes on /u, NOT in $PROJECT_DIR on /work. Measured on this node: `import torch`
+# takes 69s from a venv on /work (Lustre) versus 5-12s from /u — Lustre is pathological for
+# the thousands-of-small-files access pattern Python imports generate. The full test suite
+# could not finish in 6 minutes from /work and runs in 96s from /u. That penalty is paid by
+# every stage AND by every accelerate worker, so on 4 GPUs it is 4x per training launch —
+# real money against a 2h walltime cap. Model/data blobs stay on /work (HF_HUB_CACHE below):
+# those are few and large, which Lustre handles fine.
+VENV_DIR="${VENV_DIR:-/u/li26/venvs/astrobridge-v5}"
 PYTHON_MODULE="${PYTHON_MODULE:-python/3.11.9}"
 
 # Model/dataset downloads land here, NOT on /u. This is load-bearing, not tidiness: /u/$USER has
