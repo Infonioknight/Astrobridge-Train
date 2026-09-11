@@ -51,9 +51,11 @@ def _patch_shards(path):
 
 def test_rows_missing_caption_are_dropped(tmp_path):
     path = tmp_path / "train-00000.parquet"
+    # Populated on caption_fused: that is the default caption_field, and this test is about
+    # dropping rows with no caption text, not about which stage supplies it.
     _write_dataset(path, [
-        {"object_id": "a", "caption_blind": "A galaxy."},
-        {"object_id": "b", "caption_blind": None},
+        {"object_id": "a", "caption_fused": "A galaxy."},
+        {"object_id": "b", "caption_fused": None},
     ])
     with _patch_shards(path):
         df = load_image_captions_table("irrelevant/repo")
