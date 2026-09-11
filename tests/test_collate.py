@@ -14,7 +14,8 @@ def _example(shown_image: bool, shown_spectra: bool, image_T: int = 3, spectra_T
             "image": np.random.randn(image_T, 8).astype(np.float32) if shown_image else None,
             "spectra": np.random.randn(spectra_T, 6).astype(np.float32) if shown_spectra else None,
         },
-        "prompt_ids": torch.tensor([1, 2, 3]),
+        "pre_ids": torch.tensor([1, 2, 3]),
+        "post_ids": torch.tensor([6, 7]),
         "caption_ids": torch.tensor([4, 5]),
     }
 
@@ -49,3 +50,20 @@ def test_caption_attn_mask_marks_real_tokens_only():
     )
     assert batch["caption_attn_mask"][0].tolist() == [1, 0, 0]
     assert batch["caption_attn_mask"][1].tolist() == [1, 1, 1]
+
+
+def test_pre_and_post_text_are_batched_and_masked_independently():
+    ex_a = _example(True, True)
+    ex_a["pre_ids"] = torch.tensor([1, 2])
+    ex_a["post_ids"] = torch.tensor([6, 7, 8, 9])
+    ex_b = _example(True, True)
+    ex_b["pre_ids"] = torch.tensor([1, 2, 3, 4])
+    ex_b["post_ids"] = torch.tensor([6, 7])
+
+    batch = collate_batch(
+        [ex_a, ex_b], ["image", "spectra"], {"image": 8, "spectra": 6}, {"image": 5, "spectra": 5}, pad_token_id=0
+    )
+    assert batch["pre_attn_mask"][0].tolist() == [1, 1, 0, 0]
+    assert batch["pre_attn_mask"][1].tolist() == [1, 1, 1, 1]
+    assert batch["post_attn_mask"][0].tolist() == [1, 1, 1, 1]
+    assert batch["post_attn_mask"][1].tolist() == [1, 1, 0, 0]

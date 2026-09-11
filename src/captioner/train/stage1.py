@@ -187,8 +187,8 @@ def run_stage1(cfg: DictConfig) -> None:
     model = Captioner(fusion_stack, llm, n_queries=int(cfg.qformer.n_queries))
 
     cache_root = Path(cfg.get("cache", {}).get("out_dir", "outputs/cache"))
-    train_ds = CaptionerDataset(manifest, captions, cfg, cache_root, "train", tokenizer, cfg.prompt.template)
-    val_ds = CaptionerDataset(manifest, captions, cfg, cache_root, "val", tokenizer, cfg.prompt.template)
+    train_ds = CaptionerDataset(manifest, captions, cfg, cache_root, "train", tokenizer, cfg.prompt)
+    val_ds = CaptionerDataset(manifest, captions, cfg, cache_root, "val", tokenizer, cfg.prompt)
     logger.info(f"Stage 1 datasets ready: train={len(train_ds)} val={len(val_ds)}")
 
     collate_fn = make_collate_fn(train_ds.modality_names, out_dims, max_tokens, tokenizer.pad_token_id)

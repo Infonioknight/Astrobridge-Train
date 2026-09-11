@@ -62,7 +62,8 @@ def _make_batch():
         "modality_batch": {
             "image": {"tokens": torch.randn(1, 3, 4), "mask": torch.zeros(1, 3, dtype=torch.bool)},
         },
-        "prompt_ids": torch.randint(0, 32, (1, 5)),
+        "pre_ids": torch.randint(0, 32, (1, 3)),
+        "post_ids": torch.randint(0, 32, (1, 4)),
     }
 
 
@@ -80,8 +81,8 @@ def test_reproduces_the_real_crash_without_autocast():
     fusion_stack = model.fusion_stack
     batch = _make_batch()
     prefix = fusion_stack(batch["modality_batch"])
-    prompt_embeds = model.llm.get_input_embeddings()(batch["prompt_ids"])
-    inputs_embeds = torch.cat([prefix, prompt_embeds], dim=1)
+    embed_fn = model.llm.get_input_embeddings()
+    inputs_embeds = torch.cat([embed_fn(batch["pre_ids"]), prefix, embed_fn(batch["post_ids"])], dim=1)
 
     import pytest
 
