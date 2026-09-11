@@ -46,7 +46,12 @@ sources:
     # repo — confirmed live: 2,021 usable captions (up from 1,223 in v1), object_key format
     # (gmw_XXXXXXXX) still matches the spectra table's wiki_entity_id column.
     hf_path: UniverseTBD/AstroBridge-Data
-    filename: captions/spectra/desi_sdss_combined_v2_gemini-3_7-flash.jsonl
+    # v6 switches to the ground-truth caption set. Verified live against the repo: 2,024
+    # objects, every caption regenerated with gemini-3.8-flash — the text differs on
+    # 2024/2024 objects shared with the previous file, so this is a full rewrite rather
+    # than a patch. 23 objects in the old file are absent here and none are new.
+    # Previous (v5 and earlier): captions/spectra/desi_sdss_combined_v2_gemini-3_7-flash.jsonl
+    filename: captions/spectra/captions_combined_ground_truth_v1_gemini-3_8-flash.jsonl
     revision: null
   transients:
     # 987 ZTF BTS supernovae with accepted alert photometry — the only source of time-domain data.

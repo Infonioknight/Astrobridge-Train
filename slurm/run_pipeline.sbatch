@@ -24,7 +24,7 @@
 #  and stage1/stage2 pick up from their own latest checkpoint (see
 #  src/captioner/train/loop.py). Delete a stamp to force that step to rerun.
 # =============================================================================
-#SBATCH --job-name=astrobridge-v5
+#SBATCH --job-name=astrobridge-v6
 #SBATCH --account=bfvh-dtai-gh
 #SBATCH --partition=ghx4-interactive
 #SBATCH --nodes=1
@@ -58,7 +58,7 @@ set -euo pipefail
 # The HF Hub repo id to publish to, i.e. everything after huggingface.co/.
 # Defaults to this branch's target (UniverseTBD/astrobridge-model-v4_qwen); override with
 # `sbatch --export=ALL,HF_REPO_ID=...`, or set it empty to run everything but skip the upload.
-HF_REPO_ID="${HF_REPO_ID:-UniverseTBD/astrobridge-model-v5}"
+HF_REPO_ID="${HF_REPO_ID:-UniverseTBD/astrobridge-model-v6}"
 
 # Publish privately (default) or publicly.
 HF_PUBLIC="${HF_PUBLIC:-0}"
@@ -66,7 +66,7 @@ HF_PUBLIC="${HF_PUBLIC:-0}"
 # -----------------------------------------------------------------------------
 #  Optional knobs
 # -----------------------------------------------------------------------------
-PROJECT_DIR="${PROJECT_DIR:-/work/hdd/bfvh/li26/Astrobridge-Train-v5}"
+PROJECT_DIR="${PROJECT_DIR:-/work/hdd/bfvh/li26/Astrobridge-Train-v6}"
 # The venv goes on /u, NOT in $PROJECT_DIR on /work. Measured on this node: `import torch`
 # takes 69s from a venv on /work (Lustre) versus 5-12s from /u — Lustre is pathological for
 # the thousands-of-small-files access pattern Python imports generate. The full test suite
@@ -74,7 +74,7 @@ PROJECT_DIR="${PROJECT_DIR:-/work/hdd/bfvh/li26/Astrobridge-Train-v5}"
 # every stage AND by every accelerate worker, so on 4 GPUs it is 4x per training launch —
 # real money against a 2h walltime cap. Model/data blobs stay on /work (HF_HUB_CACHE below):
 # those are few and large, which Lustre handles fine.
-VENV_DIR="${VENV_DIR:-/u/li26/venvs/astrobridge-v5}"
+VENV_DIR="${VENV_DIR:-/u/li26/venvs/astrobridge-v6}"
 PYTHON_MODULE="${PYTHON_MODULE:-python/3.11.9}"
 
 # Model/dataset downloads land here, NOT on /u. This is load-bearing, not tidiness: /u/$USER has
