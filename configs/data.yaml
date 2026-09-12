@@ -20,7 +20,11 @@ sources:
     # in parquet shards. Keyed by object_id in the Legacy Survey namespace (matched via
     # object_id_legacy).
     hf_path: gapatron/astrobridge-image-captions
-    revision: null
+    # Pinned to match the v5 multimodal run exactly. This dataset's caption_fused text was
+    # rewritten in place on 2026-09-10 (commit d9fadc12) — all 3,487 objects, 100% of the text.
+    # Both runs must train on the same captions or the image-only vs multimodal comparison is
+    # confounded by a data change. Set to null to track main again.
+    revision: d9fadc12fa3e2061b5c397b52f0e39bde10a2ec0
 
 join:
   key: _healpix_29
