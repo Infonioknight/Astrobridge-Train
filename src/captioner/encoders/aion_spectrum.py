@@ -105,6 +105,30 @@ class AionSpectrumEncoder:
                 "data/spectra_dataset.py's survey-inference logic against the real data."
             )
 
+        # AION's codec projects onto its latent grid with torch.searchsorted, which REQUIRES a
+        # sorted wavelength row and silently returns undefined indices otherwise. AstroBridge-
+        # Data pads `spectrum.lambda` with a `-1` sentinel on 94% of SDSS rows, which made every
+        # cached v5/v6 spectrum embedding near-identical (99.6% shared token codes; a class probe
+        # below its own majority baseline). That failed completely silently for two full training
+        # runs, so it is a hard error here rather than a warning. Trim with
+        # `captioner.data.spectra_dataset.trimmed_spectrum_arrays` before calling this.
+        if wavelength.shape[1] > 1:
+            steps = wavelength[:, 1:] - wavelength[:, :-1]
+            bad_rows = (steps <= 0).any(dim=1)
+            if bool(bad_rows.any()):
+                i = int(bad_rows.nonzero()[0, 0])
+                row = wavelength[i]
+                j = int((row[1:] - row[:-1] <= 0).nonzero()[0, 0])
+                raise ValueError(
+                    f"batch['wavelength'] must be strictly increasing along dim=1: "
+                    f"{int(bad_rows.sum())}/{wavelength.shape[0]} rows are not. First offender "
+                    f"row {i} at index {j}: ...{row[max(0, j - 1):j + 3].tolist()}... "
+                    "AION's interp1d uses torch.searchsorted, which gives undefined results on an "
+                    "unsorted grid — this does not raise inside AION, it silently returns garbage "
+                    "embeddings. Drop `wavelength <= 0` sentinels and sort ascending first (see "
+                    "trimmed_spectrum_arrays in captioner.data.spectra_dataset)."
+                )
+
         B = flux.shape[0]
         emb_by_index: dict[int, Tensor] = {}
         for survey_name, modality_cls in (("desi", DESISpectrum), ("sdss", SDSSSpectrum)):

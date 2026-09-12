@@ -20,12 +20,18 @@ sources:
     # *_captions.json (`caption_blind`); this repo is the same author's superset. Keyed by
     # object_id in the Legacy Survey namespace (matched via object_id_legacy, same as before).
     hf_path: gapatron/astrobridge-image-captions
-    # Pinned deliberately for v5. This dataset's caption_fused text was rewritten in place on
-    # 2026-09-10 (commit d9fadc12, "Upload dataset") — all 3,487 objects, same ids, 100% of the
-    # caption text changed — which is what made v4's captions stale and prompted this retrain.
-    # With `revision: null` the next in-place update would silently change what v5 trained on
-    # too. Set back to null to track main again.
-    revision: d9fadc12fa3e2061b5c397b52f0e39bde10a2ec0
+    # Pinned deliberately. This dataset's caption text gets rewritten in place, so `revision:
+    # null` would silently change what a run trained on. History so far, every one a full
+    # rewrite of all 3,487 objects with the same ids:
+    #   d9fadc12  2026-09-10 21:34  what v5 and v6 trained on
+    #   233e44f2  2026-09-11 22:04  add captioning prompt source (caption-blind-v2)
+    #   0e1cc339  2026-09-11 23:07  update captioning prompt (caption-blind-v3-merger)
+    #   b8967f45  2026-09-12 01:16  <- v7 trains on this
+    # Verified against the live repo before re-pinning: caption_fused and caption_blind differ on
+    # 3487/3487 objects vs d9fadc12, while the pixel columns (flux_*/ivar_*/mask_*) are
+    # byte-identical — so the image EMBEDDING cache stays valid across this bump and only
+    # `make captions` needs re-running, not `make cache`.
+    revision: b8967f451d0516f89892c3229b1cbef733977391
                       # read directly from data/train-*.parquet, not via `datasets.load_dataset`
                       # — see data/image_dataset.py. No `split` here: the repo has only `train`.
     # Which caption stage feeds the image tier. caption_fused is the dataset's own final output:
@@ -50,7 +56,12 @@ sources:
     # repo — confirmed live: 2,021 usable captions (up from 1,223 in v1), object_key format
     # (gmw_XXXXXXXX) still matches the spectra table's wiki_entity_id column.
     hf_path: UniverseTBD/AstroBridge-Data
-    filename: captions/spectra/desi_sdss_combined_v2_gemini-3_7-flash.jsonl
+    # v6 switches to the ground-truth caption set. Verified live against the repo: 2,024
+    # objects, every caption regenerated with gemini-3.8-flash — the text differs on
+    # 2024/2024 objects shared with the previous file, so this is a full rewrite rather
+    # than a patch. 23 objects in the old file are absent here and none are new.
+    # Previous (v5 and earlier): captions/spectra/desi_sdss_combined_v2_gemini-3_7-flash.jsonl
+    filename: captions/spectra/captions_combined_ground_truth_v1_gemini-3_8-flash.jsonl
     revision: null
   transients:
     # 987 ZTF BTS supernovae with accepted alert photometry — the only source of time-domain data.
@@ -68,7 +79,20 @@ join:
 splits:
   # train is implicit (everything not assigned to val/test). val/test are drawn according to
   # `policy` below, and unpaired objects always go to train — see manifest.py.
-  honor_upstream: true
+  # v7: OFF. The source's own split labels put 331 of the 334 DESI spectra in test, leaving
+  # exactly 2 DESI spectra in train — so v5/v6 trained almost entirely on SDSS and were scored
+  # on a spectra test set that is 72% DESI, across a boundary AION itself treats as two separate
+  # modalities (tok_spectrum_desi vs tok_spectrum_sdss). There is no way to get DESI into
+  # training while honouring that labelling, so it is dropped in favour of the survey-stratified
+  # draw below. `split_upstream` is still carried in the manifest for reference and reporting.
+  # NOTE: this makes v7's test set NOT comparable object-for-object with v4/v5/v6.
+  honor_upstream: false
+  # Strata for the val/test draw. `tier` alone is not enough when a tier mixes populations the
+  # model must generalise across — see _draw_per_tier in data/manifest.py. `survey` splits
+  # desi/sdss within the spectra tier and legacy-south/legacy-north within the image tier
+  # (different cutout sizes, and north has no ivar/mask/i-band). Light curves have no survey and
+  # form their own stratum rather than being dropped from the draw.
+  stratify_by: [tier, survey]
   policy: stratified
   # stratified | joint_only | auto.
   #   auto       - the original behaviour: joint-only when there are at least
@@ -78,7 +102,10 @@ splits:
   # Pinned to `stratified` deliberately rather than left on `auto`: `auto` silently changes the
   # meaning of val/test as soon as the joint count crosses min_joint_objects, which would make
   # val_loss incomparable across runs for a reason nothing in the logs points at.
-  val: 0.1
+  # v7: 70/20/10 train/val/test (was 80/10/10). Fractions are the val and test shares; train is
+  # whatever is left. Drawn within every (tier, survey) stratum, so each survey lands 70/20/10 on
+  # its own rather than only the totals working out.
+  val: 0.2
   test: 0.1
   seed: ${seed}          # resolved from base.yaml at load time
 

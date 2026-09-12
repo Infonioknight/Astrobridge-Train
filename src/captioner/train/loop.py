@@ -140,6 +140,11 @@ def run_training(
     accelerator.print(f"Starting training: epochs={epochs}, batches/epoch={len(train_loader)}")
 
     for epoch in range(start_epoch, epochs):
+        # Re-roll each object's modality subset and (system, instruction) draw. Without this the
+        # draw is fixed for the whole run — see CaptionerDataset.set_epoch.
+        base_ds = getattr(train_loader, "dataset", None)
+        if hasattr(base_ds, "set_epoch"):
+            base_ds.set_epoch(epoch)
         model.train()
         # `disable=` rather than skipping the wrap entirely: on non-main ranks tqdm still needs to
         # exist as a plain no-op iterator wrapper, since the `for batch in ...` below is unchanged

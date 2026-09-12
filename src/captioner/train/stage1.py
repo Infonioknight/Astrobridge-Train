@@ -12,6 +12,7 @@ Slurm cgroup — see that function's docstring for the measurements. Launch with
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -24,7 +25,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from captioner.data.collate import make_collate_fn
 from captioner.data.dataset import CaptionerDataset
-from captioner.model.captioner import Captioner, FusionStack
+from captioner.model.captioner import Captioner, FusionStack, llm_embedding_norm
 from captioner.train.loop import run_training
 from captioner.utils.logging import get_logger
 from captioner.utils.seeding import seed_everything
@@ -163,7 +164,14 @@ def get_llm_hidden_size(llm) -> int:
 def run_stage1(cfg: DictConfig) -> None:
     seed_everything(int(cfg.seed))
 
-    grad_accum = max(1, int(cfg.batch_size) // int(cfg.micro_batch_size))
+    # `batch_size` is a GLOBAL budget, so the per-process accumulation has to divide by the
+    # world size. Without the `num_processes` term (the pre-fix behaviour) `batch_size: 32` meant
+    # 32 PER RANK: the v6 run on 8 ranks trained at an effective batch of 4 x 8 x 8 = 256, which
+    # left 4144 train examples / 256 = 17 optimizer steps per epoch and 510 steps for all of
+    # stage 1. That is the single biggest reason the fusion stack never learned to condition on
+    # anything — see DIAGNOSIS.md fault 2.
+    world = max(1, int(os.environ.get("WORLD_SIZE", "1")))
+    grad_accum = max(1, int(cfg.batch_size) // (int(cfg.micro_batch_size) * world))
     accelerator = Accelerator(gradient_accumulation_steps=grad_accum)
 
     manifest = pd.read_parquet(cfg.manifest.parquet)
@@ -183,6 +191,7 @@ def run_stage1(cfg: DictConfig) -> None:
         qformer_cfg=dict(cfg.qformer),
         projector_hidden_mult=int(cfg.projector.hidden_mult),
         projector_dropout=float(cfg.projector.dropout),
+        adapter_target_norm=llm_embedding_norm(llm),
     )
     model = Captioner(fusion_stack, llm, n_queries=int(cfg.qformer.n_queries))
 

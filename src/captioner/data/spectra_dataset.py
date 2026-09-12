@@ -62,6 +62,7 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from captioner.utils.logging import get_logger
@@ -313,3 +314,48 @@ def load_gemini_spectra_captions(
         "both skipped)."
     )
     return df
+
+
+def trimmed_spectrum_arrays(spectrum) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """One object's `(flux, wavelength, ivar, mask)` with the wavelength grid made STRICTLY
+    INCREASING — drop `wavelength <= 0`, then sort ascending.
+
+    This is not defensive tidying, it is the difference between AION seeing the spectrum and
+    AION seeing noise. AstroBridge-Data pads `spectrum.lambda` with a `-1` sentinel at the end of
+    the array on 94% of SDSS rows (282/300 sampled), so the raw grid looks like
+    `[3789.7, 3790.5, ..., 9219.3, -1, -1, -1, ...]`. AION's codec projects onto its own latent
+    grid via `LatentSpectralGrid.to_latent` -> `interp1d` -> `torch.searchsorted(wavelength,
+    target)`, and `searchsorted` REQUIRES a sorted array — on unsorted input its result is
+    undefined, so every spectrum interpolated to near-identical garbage and AION's VQ tokenizer
+    collapsed. Measured on 700 real SDSS spectra: a quasar and an early-type galaxy shared 99.6%
+    of their 273 token codes, and a linear class probe on the resulting embedding scored 0.356
+    against a 0.401 majority baseline (i.e. below chance). With this trim: 9.8% shared codes and
+    0.660 linear / 0.693 MLP. See DIAGNOSIS.md and diag/fix_test.py for the full before/after.
+
+    The sentinel positions are already `mask=True` in the source data, but the mask never reaches
+    the interpolation — AION's codec uses it only for the flux normalization factor — so masking
+    alone does not help. The rows have to go.
+    """
+    flux = np.asarray(spectrum["flux"], dtype=np.float32)
+    wavelength = np.asarray(spectrum["lambda"], dtype=np.float32)
+    ivar = np.asarray(spectrum["ivar"], dtype=np.float32)
+    mask = np.asarray(spectrum["mask"], dtype=bool)
+
+    keep = np.isfinite(wavelength) & (wavelength > 0)
+    flux, wavelength, ivar, mask = flux[keep], wavelength[keep], ivar[keep], mask[keep]
+
+    order = np.argsort(wavelength, kind="stable")
+    return flux[order], wavelength[order], ivar[order], mask[order]
+
+
+def spectrum_group_key(spectrum) -> int:
+    """Shard-partition key: the object's TRIMMED length. Objects only share a shard when they
+    need no cross-object padding at all.
+
+    Without this, `cache_modality` sharded spectra in plain manifest order and every shard mixed
+    DESI (7781 samples) with SDSS (~3845-3883) — 84.7% of cached objects (1844/2178) were padded
+    out to the longest member. Measured effect on the embedding was small (3.4%), but it makes an
+    object's embedding depend on which shard it happened to land in, which is a reproducibility
+    hazard and exactly the kind of thing that hid the sentinel bug above.
+    """
+    return int(len(trimmed_spectrum_arrays(spectrum)[0]))

@@ -8,6 +8,7 @@ docstring and `captioner/README.md`'s cluster section.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -19,7 +20,7 @@ from torch.utils.data import DataLoader
 
 from captioner.data.collate import make_collate_fn
 from captioner.data.dataset import CaptionerDataset
-from captioner.model.captioner import Captioner, FusionStack
+from captioner.model.captioner import Captioner, FusionStack, llm_embedding_norm
 from captioner.train.checkpoint import assert_quantization_matches
 from captioner.train.loop import run_training
 from captioner.train.stage1 import _cosine_with_warmup, build_llm_staggered, get_llm_hidden_size
@@ -35,7 +36,14 @@ def run_stage2(cfg: DictConfig) -> None:
     stage1_state_json = Path(cfg.init_from).parent / "state.json"
     assert_quantization_matches(stage1_state_json, cfg)
 
-    grad_accum = max(1, int(cfg.batch_size) // int(cfg.micro_batch_size))
+    # `batch_size` is a GLOBAL budget, so the per-process accumulation has to divide by the
+    # world size. Without the `num_processes` term (the pre-fix behaviour) `batch_size: 32` meant
+    # 32 PER RANK: the v6 run on 8 ranks trained at an effective batch of 4 x 8 x 8 = 256, which
+    # left 4144 train examples / 256 = 17 optimizer steps per epoch and 510 steps for all of
+    # stage 1. That is the single biggest reason the fusion stack never learned to condition on
+    # anything — see DIAGNOSIS.md fault 2.
+    world = max(1, int(os.environ.get("WORLD_SIZE", "1")))
+    grad_accum = max(1, int(cfg.batch_size) // (int(cfg.micro_batch_size) * world))
     accelerator = Accelerator(gradient_accumulation_steps=grad_accum)
 
     manifest = pd.read_parquet(cfg.manifest.parquet)
@@ -76,6 +84,7 @@ def run_stage2(cfg: DictConfig) -> None:
         qformer_cfg=dict(cfg.qformer),
         projector_hidden_mult=int(cfg.projector.hidden_mult),
         projector_dropout=float(cfg.projector.dropout),
+        adapter_target_norm=llm_embedding_norm(llm),
     )
     logger.info(f"Loading stage 1 fusion stack checkpoint from {cfg.init_from} ...")
     fusion_stack.load_state_dict(torch.load(cfg.init_from, map_location="cpu", weights_only=False))

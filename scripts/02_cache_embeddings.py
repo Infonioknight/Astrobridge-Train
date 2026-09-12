@@ -21,6 +21,7 @@ from captioner.data.cache import cache_modality, verify_fp16_roundtrip
 from captioner.data.transients_dataset import prepare_lightcurve_arrays
 from captioner.encoders.registry import build_encoder
 from captioner.utils.config import load_config, remaining_argv
+from captioner.data.spectra_dataset import spectrum_group_key, trimmed_spectrum_arrays
 from captioner.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -39,21 +40,30 @@ def _spectra_batch_loader(raw_by_id: dict):
 
     def _load(object_ids: list[str]) -> dict[str, torch.Tensor]:
         rows = [raw_by_id[oid] for oid in object_ids]
-        spectra = [r["spectrum"] for r in rows]
-        fluxes = [np.asarray(s["flux"], dtype=np.float32) for s in spectra]
-        max_len = max(len(f) for f in fluxes)
+        trimmed = [trimmed_spectrum_arrays(r["spectrum"]) for r in rows]
+        max_len = max(len(t[0]) for t in trimmed)
 
-        flux_tensor = torch.zeros((len(fluxes), max_len), dtype=torch.float32)
-        wave_tensor = torch.zeros((len(fluxes), max_len), dtype=torch.float32)
-        ivar_tensor = torch.ones((len(fluxes), max_len), dtype=torch.float32)
-        mask_tensor = torch.zeros((len(fluxes), max_len), dtype=torch.bool)
+        flux_tensor = torch.zeros((len(trimmed), max_len), dtype=torch.float32)
+        wave_tensor = torch.zeros((len(trimmed), max_len), dtype=torch.float32)
+        # Padding must read as "no measurement here": ivar=0 (no weight) and mask=True (excluded
+        # from AION's normalization). The previous defaults were the exact opposite — ivar=1 and
+        # mask=False told AION the padding was fully-trusted real signal.
+        ivar_tensor = torch.zeros((len(trimmed), max_len), dtype=torch.float32)
+        mask_tensor = torch.ones((len(trimmed), max_len), dtype=torch.bool)
 
-        for i, s in enumerate(spectra):
-            n = len(fluxes[i])
-            flux_tensor[i, :n] = torch.from_numpy(fluxes[i])
-            wave_tensor[i, :n] = torch.from_numpy(np.asarray(s["lambda"], dtype=np.float32))
-            ivar_tensor[i, :n] = torch.from_numpy(np.asarray(s["ivar"], dtype=np.float32))
-            mask_tensor[i, :n] = torch.from_numpy(np.asarray(s["mask"], dtype=bool))
+        for i, (flux, wavelength, ivar, mask) in enumerate(trimmed):
+            n = len(flux)
+            flux_tensor[i, :n] = torch.from_numpy(flux)
+            wave_tensor[i, :n] = torch.from_numpy(wavelength)
+            ivar_tensor[i, :n] = torch.from_numpy(ivar)
+            mask_tensor[i, :n] = torch.from_numpy(mask)
+            if n < max_len:
+                # Continue the grid upward rather than leaving zeros: `searchsorted` needs the
+                # whole row sorted, and a zero-filled tail after ascending values is exactly the
+                # non-monotonicity that broke this pipeline in the first place. 0.8 A is AION's
+                # own latent-grid resolution (LatentSpectralGrid(resolution=0.8)).
+                pad = np.arange(1, max_len - n + 1, dtype=np.float32) * 0.8
+                wave_tensor[i, n:] = torch.from_numpy(wavelength[-1] + pad)
 
         survey = [r["survey"] for r in rows]
 

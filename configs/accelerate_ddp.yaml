@@ -15,7 +15,10 @@ gpu_ids: all
 machine_rank: 0
 main_training_function: main
 mixed_precision: bf16
-num_machines: 1          # single node only — multi-node is out of scope for this build (§0)
+num_machines: 1          # baseline for a single node. Multi-node IS supported: the sbatch
+                         # overrides num_machines/num_processes/machine_rank/main_process_ip on
+                         # the accelerate CLI (see slurm/_accel_node.sh), so this file stays a
+                         # valid standalone single-node config and is not rewritten per run.
 num_processes: 4         # <-- set this to your GPU count
 rdzv_backend: static
 same_network: true

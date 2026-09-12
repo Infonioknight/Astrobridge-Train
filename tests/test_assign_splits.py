@@ -75,3 +75,48 @@ def test_splits_are_stratified_across_tiers():
     val = out[out["split"] == "val"]
     assert (val["tier"] == "joint").sum() == 5
     assert (val["tier"] == "single").sum() == 5
+
+
+def test_stratify_by_survey_keeps_each_survey_in_train():
+    """The v5/v6 distribution bug, as a regression test.
+
+    `split_upstream` put 331 of 334 DESI spectra in test, leaving 2 in train. Stratifying on
+    `tier` alone cannot see that, because DESI and SDSS share the spectra tier. With
+    `stratify_by: [tier, survey]` every survey must land ~80/10/10 on its own.
+    """
+    import numpy as np
+    import pandas as pd
+    from omegaconf import OmegaConf
+
+    from captioner.data.manifest import assign_splits
+
+    rows = []
+    for i in range(1800):
+        rows.append({"object_id": f"sdss_{i}", "tier": "single", "survey": "sdss"})
+    for i in range(334):
+        rows.append({"object_id": f"desi_{i}", "tier": "single", "survey": "desi"})
+    for i in range(500):
+        rows.append({"object_id": f"lc_{i}", "tier": "single", "survey": np.nan})
+    manifest = pd.DataFrame(rows)
+
+    cfg = OmegaConf.create(
+        {
+            "splits": {
+                "val": 0.1, "test": 0.1, "seed": 1337, "policy": "stratified",
+                "honor_upstream": False, "stratify_by": ["tier", "survey"],
+            },
+            "sanity": {"min_joint_objects": 500},
+        }
+    )
+    out = assign_splits(manifest, cfg)
+
+    for survey in ["sdss", "desi"]:
+        sub = out[out["survey"] == survey]
+        frac = (sub["split"] == "train").mean()
+        assert 0.75 < frac < 0.85, f"{survey} train fraction {frac:.2f} is not ~0.8"
+        assert (sub["split"] == "test").sum() > 0, f"{survey} has no test objects"
+
+    # light curves have no survey; they must still be drawn, not silently all-train
+    lc = out[out["survey"].isna()]
+    assert 0.75 < (lc["split"] == "train").mean() < 0.85
+    assert (lc["split"] == "test").sum() > 0

@@ -289,13 +289,41 @@ def _compute_stats(manifest: pd.DataFrame, join_method: str, cfg: DictConfig) ->
     return stats
 
 
+STRATIFY_NA = "(none)"
+
+
 def _draw_per_tier(
-    manifest: pd.DataFrame, object_ids, frac_val: float, frac_test: float, rng
+    manifest: pd.DataFrame,
+    object_ids,
+    frac_val: float,
+    frac_test: float,
+    rng,
+    keys: list[str] | None = None,
 ) -> tuple[set, set]:
+    """Draw val/test proportionally within every stratum, where a stratum is one combination of
+    `keys` (default `["tier"]`, i.e. the original behaviour).
+
+    Stratifying on `tier` alone is not enough once a tier mixes populations the model has to
+    generalise across. Confirmed real on this dataset: the spectra tier holds 1,844 SDSS spectra
+    (~3,860 samples, SDSSSpectrum codec) and 334 DESI (7,781 samples, DESISpectrum codec — a
+    genuinely different AION internal domain), and `split_upstream` put 331 of the 334 DESI in
+    test. v5 and v6 therefore trained on 2 DESI spectra and were scored on a spectra test set
+    that is 72% DESI. Adding `survey` to the keys splits each survey 80/10/10 on its own.
+    It does the same for the image tier's legacy-south (1,620) vs legacy-north (653), which
+    differ in cutout size and in whether ivar/mask/i-band exist at all.
+
+    NaN is a real stratum here, not missing data — light-curve objects have no `survey` — so it
+    is filled rather than dropped. `groupby` would otherwise silently drop all 987 of them from
+    the draw and leave them entirely in train.
+    """
+    keys = list(keys or ["tier"])
     val: set = set()
     test: set = set()
     pool = manifest[manifest["object_id"].isin(set(object_ids))]
-    for _, group in pool.groupby("tier", sort=True):
+    if pool.empty:
+        return val, test
+    grouping = [pool[k].astype(object).where(pool[k].notna(), STRATIFY_NA) for k in keys]
+    for _, group in pool.groupby(grouping, sort=True):
         ids = group["object_id"].to_numpy().copy()
         rng.shuffle(ids)
         n_val = int(round(len(ids) * float(frac_val)))
@@ -328,6 +356,10 @@ def assign_splits(manifest: pd.DataFrame, cfg: DictConfig) -> pd.DataFrame:
     rng = np.random.default_rng(int(cfg.splits.seed))
     manifest = manifest.copy()
     manifest["split"] = "train"
+
+    stratify_by = [
+        k for k in list(cfg.splits.get("stratify_by", ["tier"])) if k in manifest.columns
+    ] or ["tier"]
 
     joint_ids = manifest.loc[manifest["tier"] == "joint", "object_id"].to_numpy()
     min_joint = int(cfg.sanity.min_joint_objects) if "sanity" in cfg else 0
@@ -383,19 +415,20 @@ def assign_splits(manifest: pd.DataFrame, cfg: DictConfig) -> pd.DataFrame:
 
     if upstream is None:
         val_ids, test_ids = _draw_per_tier(
-            manifest, eligible_ids, cfg.splits.val, cfg.splits.test, rng
+            manifest, eligible_ids, cfg.splits.val, cfg.splits.test, rng, stratify_by
         )
     else:
         test_ids |= set(manifest.loc[upstream == "test", "object_id"])
 
         carved, _ = _draw_per_tier(
-            manifest, manifest.loc[upstream == "train", "object_id"], cfg.splits.val, 0.0, rng
+            manifest, manifest.loc[upstream == "train", "object_id"], cfg.splits.val, 0.0, rng,
+            stratify_by,
         )
         val_ids |= carved
 
         unlabelled = set(manifest.loc[upstream.isna(), "object_id"]) & eligible_ids
         drawn_val, drawn_test = _draw_per_tier(
-            manifest, unlabelled, cfg.splits.val, cfg.splits.test, rng
+            manifest, unlabelled, cfg.splits.val, cfg.splits.test, rng, stratify_by
         )
         val_ids |= drawn_val
         test_ids |= drawn_test
@@ -463,3 +496,18 @@ def write_manifest(cfg: DictConfig) -> None:
     logger.info(f"Wrote manifest with {len(manifest)} rows to {cfg.manifest.parquet}")
     logger.info(f"Tier histogram: {stats['tier_histogram']}")
     logger.info(f"Split histogram: {stats['split_histogram']} (source: {stats['split_source']})")
+    # Per-survey balance, logged every run. The whole reason v7 re-draws splits is that this was
+    # never printed: `split_upstream` put 331/334 DESI spectra in test and nothing surfaced it.
+    if "survey" in manifest.columns:
+        balance = (
+            manifest.assign(survey=manifest["survey"].fillna("(none)"))
+            .groupby(["survey", "split"], sort=True)
+            .size()
+            .unstack(fill_value=0)
+        )
+        for survey, row in balance.iterrows():
+            counts = {k: int(v) for k, v in row.items()}
+            total = sum(counts.values())
+            train_frac = counts.get("train", 0) / total if total else 0.0
+            flag = "  <-- SKEWED" if total >= 50 and train_frac < 0.5 else ""
+            logger.info(f"  split balance [{survey:<14}] {counts} train_frac={train_frac:.2f}{flag}")

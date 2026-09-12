@@ -24,9 +24,13 @@
 #  and stage1/stage2 pick up from their own latest checkpoint (see
 #  src/captioner/train/loop.py). Delete a stamp to force that step to rerun.
 # =============================================================================
-#SBATCH --job-name=astrobridge-v5
+#SBATCH --job-name=astrobridge-v6
 #SBATCH --account=bfvh-dtai-gh
 #SBATCH --partition=ghx4-interactive
+# 1 node. The 2-node/8-rank run (3131676) measured ~1.9 min/epoch vs v5's ~3.5 on 4 GPUs
+# -- 1.8x for 2x the hardware -- and the doubled effective batch pushed stage-1 val_loss to
+# ~1.12 against v5's 1.0589. It also waits longer in the queue. Set nodes=2 again only to
+# exercise the multi-node path in slurm/_accel_node.sh, which is kept and still works.
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
@@ -58,7 +62,7 @@ set -euo pipefail
 # The HF Hub repo id to publish to, i.e. everything after huggingface.co/.
 # Defaults to this branch's target (UniverseTBD/astrobridge-model-v4_qwen); override with
 # `sbatch --export=ALL,HF_REPO_ID=...`, or set it empty to run everything but skip the upload.
-HF_REPO_ID="${HF_REPO_ID:-UniverseTBD/astrobridge-model-v5}"
+HF_REPO_ID="${HF_REPO_ID:-UniverseTBD/astrobridge-model-v6}"
 
 # Publish privately (default) or publicly.
 HF_PUBLIC="${HF_PUBLIC:-0}"
@@ -66,7 +70,7 @@ HF_PUBLIC="${HF_PUBLIC:-0}"
 # -----------------------------------------------------------------------------
 #  Optional knobs
 # -----------------------------------------------------------------------------
-PROJECT_DIR="${PROJECT_DIR:-/work/hdd/bfvh/li26/Astrobridge-Train-v5}"
+PROJECT_DIR="${PROJECT_DIR:-/work/hdd/bfvh/li26/Astrobridge-Train-v6}"
 # The venv goes on /u, NOT in $PROJECT_DIR on /work. Measured on this node: `import torch`
 # takes 69s from a venv on /work (Lustre) versus 5-12s from /u — Lustre is pathological for
 # the thousands-of-small-files access pattern Python imports generate. The full test suite
@@ -74,7 +78,7 @@ PROJECT_DIR="${PROJECT_DIR:-/work/hdd/bfvh/li26/Astrobridge-Train-v5}"
 # every stage AND by every accelerate worker, so on 4 GPUs it is 4x per training launch —
 # real money against a 2h walltime cap. Model/data blobs stay on /work (HF_HUB_CACHE below):
 # those are few and large, which Lustre handles fine.
-VENV_DIR="${VENV_DIR:-/u/li26/venvs/astrobridge-v5}"
+VENV_DIR="${VENV_DIR:-/u/li26/venvs/astrobridge-v6}"
 PYTHON_MODULE="${PYTHON_MODULE:-python/3.11.9}"
 
 # Model/dataset downloads land here, NOT on /u. This is load-bearing, not tidiness: /u/$USER has
@@ -182,14 +186,39 @@ run_step 05c_cache_lightcurve python scripts/02_cache_embeddings.py --modality l
 # Match accelerate's process count to the GPUs actually allocated to this job
 # instead of the 4 hardcoded in configs/accelerate_ddp.yaml. The Makefile reads
 # ACCELERATE_CONFIG, so stage1/stage2 pick this up with no other changes.
-NGPU="$(nvidia-smi -L | wc -l)"
+NGPU="$(nvidia-smi -L | wc -l)"                    # GPUs on THIS node
+NNODES="${SLURM_JOB_NUM_NODES:-1}"
+WORLD=$(( NGPU * NNODES ))                         # total ranks across the allocation
 ACCELERATE_CONFIG="outputs/accelerate_job_${JOB_ID}.yaml"
-sed "s|^num_processes:.*|num_processes: ${NGPU}|" configs/accelerate_ddp.yaml > "$ACCELERATE_CONFIG"
+sed "s|^num_processes:.*|num_processes: ${WORLD}|" configs/accelerate_ddp.yaml > "$ACCELERATE_CONFIG"
 export ACCELERATE_CONFIG
-echo "=== accelerate configured for ${NGPU} GPU(s): $ACCELERATE_CONFIG"
+
+# run_training <stamp> <script.py>
+# One node: `accelerate launch` directly, exactly as before.
+# Several nodes: srun one launcher PER NODE, each with its own --machine_rank, all pointed at
+# node 0 for rendezvous. accelerate then owns the NGPU local ranks on each node, so the world is
+# NNODES x NGPU. The training code is already rank-aware (is_main_process guards and
+# wait_for_everyone barriers in train/loop.py), so nothing above the launcher changes.
+if [ "$NNODES" -gt 1 ]; then
+    export ACCEL_NUM_PROCESSES="$WORLD"
+    export ACCEL_NUM_MACHINES="$NNODES"
+    export ACCEL_MAIN_IP="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)"
+    # Derive the port from the job id so two of these can never collide on a shared node.
+    export ACCEL_MAIN_PORT=$(( 29500 + (${SLURM_JOB_ID:-0} % 1000) ))
+    export PROJECT_DIR
+    run_training() {
+        run_step "$1" srun --ntasks="$NNODES" --ntasks-per-node=1 \
+            "$PROJECT_DIR/slurm/_accel_node.sh" "$2"
+    }
+    echo "=== accelerate: ${NNODES} node(s) x ${NGPU} GPU = ${WORLD} ranks, rendezvous ${ACCEL_MAIN_IP}:${ACCEL_MAIN_PORT}"
+else
+    run_training() { run_step "$1" make "${2}" ACCELERATE_CONFIG="$ACCELERATE_CONFIG"; }
+    echo "=== accelerate configured for ${NGPU} GPU(s) on one node: $ACCELERATE_CONFIG"
+fi
 
 run_step 06a_cache  make cache
-run_step 06b_stage1 make stage1 ACCELERATE_CONFIG="$ACCELERATE_CONFIG"
+if [ "$NNODES" -gt 1 ]; then run_training 06b_stage1 scripts/03_train_stage1.py
+else run_training 06b_stage1 stage1; fi
 
 # scripts/04_eval.py rather than `make eval`: the make target can't pass --out,
 # and both stages would otherwise overwrite the same
@@ -203,7 +232,8 @@ run_step 06c_eval_stage1 python scripts/04_eval.py \
     --checkpoint-dir outputs/checkpoints/stage1/best \
     --out outputs/eval/groundedness_report_stage1.json
 
-run_step 06d_stage2 make stage2 ACCELERATE_CONFIG="$ACCELERATE_CONFIG"
+if [ "$NNODES" -gt 1 ]; then run_training 06d_stage2 scripts/05_train_stage2.py
+else run_training 06d_stage2 stage2; fi
 
 run_step 06e_eval_stage2 python scripts/04_eval.py \
     --checkpoint-dir outputs/checkpoints/stage2/best \

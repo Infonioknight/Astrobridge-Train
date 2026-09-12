@@ -45,6 +45,18 @@ def main() -> None:
     parser.add_argument("--checkpoint-dir", required=True, help="e.g. outputs/checkpoints/stage2/best")
     parser.add_argument("--repo-id", required=True, help="e.g. your-org/astrobridge-captioner-v1")
     parser.add_argument("--public", dest="private", action="store_false", default=True)
+    parser.add_argument(
+        "--eval-report", default="outputs/eval/groundedness_report.json",
+        help="groundedness report to embed in the model card; must be newer than the checkpoint",
+    )
+    parser.add_argument(
+        "--notes-file", default=None,
+        help="markdown file appended to the model card under 'Release notes'",
+    )
+    parser.add_argument(
+        "--allow-stale-report", action="store_true",
+        help="publish even if the eval report predates the checkpoint (it will be wrong)",
+    )
     args = parser.parse_args(remaining_argv())
 
     cfg = load_config("base", "data", "modalities", "model", "stage2")
@@ -88,9 +100,33 @@ def main() -> None:
     shutil.copy(ckpt_dir / "middle.pt", publish_dir / "middle.pt")
 
     state = json.loads((ckpt_dir / "state.json").read_text())
-    eval_report_path = Path("outputs/eval/groundedness_report.json")
-    eval_report = json.loads(eval_report_path.read_text()) if eval_report_path.exists() else None
-    (publish_dir / "README.md").write_text(build_model_card(cfg.llm.name, args.repo_id, state, eval_report))
+    # The report path is an argument, not a constant, and it is checked against the checkpoint's
+    # own mtime. Hardcoding "outputs/eval/groundedness_report.json" meant a publish silently
+    # embedded whatever report happened to be sitting there — including a previous version's,
+    # since 04_eval.py can be pointed at any --out path. Shipping v6's gate numbers on v7's model
+    # card is worse than shipping none.
+    eval_report_path = Path(args.eval_report)
+    eval_report = None
+    if eval_report_path.exists():
+        if eval_report_path.stat().st_mtime < (ckpt_dir / "middle.pt").stat().st_mtime:
+            if not args.allow_stale_report:
+                raise SystemExit(
+                    f"{eval_report_path} is OLDER than {ckpt_dir / 'middle.pt'} — it almost "
+                    "certainly describes a previous checkpoint. Re-run scripts/04_eval.py against "
+                    f"this checkpoint with --out {eval_report_path}, point --eval-report at the "
+                    "right file, or pass --allow-stale-report if you really mean it."
+                )
+            logger.warning(f"{eval_report_path} predates the checkpoint; embedding it anyway.")
+        eval_report = json.loads(eval_report_path.read_text())
+    else:
+        logger.warning(
+            f"No eval report at {eval_report_path} — the model card will ship without gate "
+            "numbers. Run scripts/04_eval.py first if you want them included."
+        )
+    notes = Path(args.notes_file).read_text() if args.notes_file else None
+    (publish_dir / "README.md").write_text(
+        build_model_card(cfg.llm.name, args.repo_id, state, eval_report, notes)
+    )
 
     api = HfApi()
     api.create_repo(args.repo_id, private=args.private, exist_ok=True)
