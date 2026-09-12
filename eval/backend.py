@@ -110,8 +110,13 @@ def _local_backend(
         max_tokens = {n: int(c.max_tokens) for n, c in cfg.modalities.items()}
 
         def _generate(raw_inputs: dict, question: str, max_new_tokens: int) -> str:
+            # `cfg.prompt`, not `cfg.prompt.template`: generate_caption takes the whole prompt
+            # block and samples system/instruction variants from it. The `template` key was
+            # removed when the chat-template prompt landed (commit d229e19), which broke every
+            # runner in this package with "ConfigAttributeError: Missing key template" —
+            # unnoticed because none of them run in CI.
             return generate_caption(
-                model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt.template, device,
+                model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt, device,
                 raw_inputs, max_new_tokens=max_new_tokens, question=question,
             )
 
@@ -222,7 +227,7 @@ def _equipped_infer(
     out_dims = {n: int(c.out_dim) for n, c in cfg.modalities.items()}
     max_tokens = {n: int(c.max_tokens) for n, c in cfg.modalities.items()}
     return generate_caption(
-        model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt.template, device,
+        model, tokenizer, encoders, out_dims, max_tokens, cfg.prompt, device,
         raw_inputs_serialized, max_new_tokens=max_new_tokens, question=question,
     )
 
