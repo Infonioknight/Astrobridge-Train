@@ -35,6 +35,7 @@ import numpy as np
 import torch
 
 from captioner.data.transients_dataset import prepare_lightcurve_arrays
+from captioner.data.spectra_dataset import trimmed_spectrum_arrays
 from captioner.inference import generate_caption, load_inference_model
 from captioner.utils.config import load_config, remaining_argv
 from captioner.utils.logging import get_logger
@@ -73,16 +74,27 @@ def main() -> None:
         raw_inputs["image"] = {"pixel_values": pixel_values}
     if args.spectrum_npz is not None:
         npz = np.load(args.spectrum_npz)
-        flux = torch.from_numpy(npz["flux"]).unsqueeze(0).float()
+        # Trim `wavelength <= 0` and sort ascending before AION ever sees it. AstroBridge-Data
+        # pads its wavelength grids with a -1 sentinel, and AION's codec interpolates with
+        # torch.searchsorted, which silently returns garbage on an unsorted grid — that is what
+        # made every v5/v6 spectrum embedding near-identical. aion_spectrum.py hard-errors on a
+        # non-monotonic grid now, so without this a perfectly ordinary SDSS .npz would be
+        # rejected rather than quietly mis-encoded.
+        flux, wavelength, ivar, mask = trimmed_spectrum_arrays(
+            {
+                "flux": npz["flux"],
+                "lambda": npz["wavelength"],
+                "ivar": npz["ivar"] if "ivar" in npz else np.ones_like(npz["flux"]),
+                "mask": npz["mask"] if "mask" in npz else np.zeros_like(npz["flux"], dtype=bool),
+            }
+        )
         spectrum_batch: dict = {
-            "flux": flux,
-            "wavelength": torch.from_numpy(npz["wavelength"]).unsqueeze(0).float(),
+            "flux": torch.from_numpy(flux).unsqueeze(0).float(),
+            "wavelength": torch.from_numpy(wavelength).unsqueeze(0).float(),
+            "ivar": torch.from_numpy(ivar).unsqueeze(0).float(),
+            "mask": torch.from_numpy(mask).unsqueeze(0).bool(),
             "survey": [args.spectrum_survey],
         }
-        if "ivar" in npz:
-            spectrum_batch["ivar"] = torch.from_numpy(npz["ivar"]).unsqueeze(0).float()
-        if "mask" in npz:
-            spectrum_batch["mask"] = torch.from_numpy(npz["mask"]).unsqueeze(0).bool()
         raw_inputs["spectra"] = spectrum_batch
 
     if args.lightcurve_npz is not None:

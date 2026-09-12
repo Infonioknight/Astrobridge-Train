@@ -5,6 +5,7 @@ never be used for early stopping (§10 pitfall 8) — that stays val_loss, enfor
 from __future__ import annotations
 
 import random
+from collections import Counter
 
 import torch
 from torch.utils.data import Dataset
@@ -71,8 +72,16 @@ def shuffle_test(
     model: Captioner, dataset: Dataset, modality: str, tokenizer, device: str, n: int = 200, seed: int = 0
 ) -> dict:
     """Replace `modality` content with another object's; presence flags UNCHANGED.
-    Null result (near-zero edit distance / delta NLL) => the model is not conditioning on that
-    modality's content, only its presence.
+    Null result (near-zero edit distance) => the model is not conditioning on that modality's
+    content, only its presence.
+
+    Compares `generate(shuffled)` against `generate(original)` — NOT against the ground-truth
+    caption. That distinction is the whole test. The pre-fix version compared the shuffled
+    generation to the reference caption, so a large edit distance only ever meant "the model's
+    output differs from the reference", which is true of any imperfect model whether or not it
+    reads the input at all. It reported `null_result: false` for all three modalities on both v5
+    and v6, models whose prefix was ~91% a per-modality constant and which emitted the same
+    caption for 40% of the test set. See DIAGNOSIS.md.
     """
     rng = random.Random(seed)
     indices = rng.sample(range(len(dataset)), min(n, len(dataset)))
@@ -82,7 +91,6 @@ def shuffle_test(
         ex = dataset[idx]
         if modality not in ex["shown"]:
             continue
-        original_caption = tokenizer.decode(ex["caption_ids"], skip_special_tokens=True)
 
         donor_idx = rng.choice([j for j in range(len(dataset)) if j != idx])
         donor = dataset[donor_idx]
@@ -98,8 +106,12 @@ def shuffle_test(
         batch = collate_batch(
             [shuffled], dataset.modality_names, dataset.out_dims, dataset.max_tokens, tokenizer.pad_token_id
         )
-        generated = _generate_caption(model, tokenizer, batch, device)[0]
-        edit_distances.append(_edit_distance(generated, original_caption))
+        batch_original = collate_batch(
+            [ex], dataset.modality_names, dataset.out_dims, dataset.max_tokens, tokenizer.pad_token_id
+        )
+        generated_shuffled = _generate_caption(model, tokenizer, batch, device)[0]
+        generated_original = _generate_caption(model, tokenizer, batch_original, device)[0]
+        edit_distances.append(_edit_distance(generated_shuffled, generated_original))
 
     if not edit_distances:
         return {"modality": modality, "n": 0, "mean_edit_distance": None, "note": "no eligible examples"}
@@ -166,3 +178,56 @@ def joint_claim_fraction(captions) -> float:
             if len(claim.supporting) > 1:
                 joint += 1
     return joint / total if total else 0.0
+
+
+def diversity_test(
+    model: Captioner, dataset: Dataset, modality: str, tokenizer, device: str, n: int = 120, seed: int = 0
+) -> dict:
+    """Do DIFFERENT objects get DIFFERENT captions? The gate v5 and v6 needed and did not have.
+
+    `shuffle_test` and `ablation_test` both compare a model against itself under an intervention,
+    which a collapsed model can pass: swap a spectrum for another spectrum and a model emitting
+    one caption per modality still changes its output slightly, and removing a modality flips the
+    modality-constant outright. Neither notices that every object in a tier gets the same text.
+
+    Reported on the real published outputs: v6 was 82 unique captions out of 397 (0.207) with the
+    single most common caption covering 40.1% of the test set; v5 was 83/393 with a 16.5% top
+    share. `distinct_fraction` below 0.8, or `top1_share` above 0.05, means the model is writing
+    from its caption prior rather than from the observation.
+    """
+    rng = random.Random(seed)
+    indices = rng.sample(range(len(dataset)), min(n * 4, len(dataset)))
+
+    from captioner.data.collate import collate_batch
+
+    captions: list[str] = []
+    for idx in tqdm(indices, desc=f"diversity_test[{modality}]"):
+        if len(captions) >= n:
+            break
+        ex = dataset[idx]
+        if modality not in ex["shown"]:
+            continue
+        batch = collate_batch(
+            [ex], dataset.modality_names, dataset.out_dims, dataset.max_tokens, tokenizer.pad_token_id
+        )
+        captions.append(_generate_caption(model, tokenizer, batch, device)[0].strip())
+
+    if not captions:
+        return {"modality": modality, "n": 0, "note": "no eligible examples"}
+
+    counts = Counter(captions)
+    top_text, top_n = counts.most_common(1)[0]
+    distinct_fraction = len(counts) / len(captions)
+    top1_share = top_n / len(captions)
+    return {
+        "modality": modality,
+        "n": len(captions),
+        "distinct_fraction": distinct_fraction,
+        "top1_share": top1_share,
+        "most_common_caption": top_text[:200],
+        # top1_share can never go below 1/n, so a fixed 0.05 floor falsely fails any group with
+        # fewer than 20 samples even when every caption is distinct. Confirmed on v7's
+        # spectra/desi group: n=19, distinct_fraction 1.000, top1_share 0.0526 -> "COLLAPSED".
+        # Require a repeat rate meaningfully above the floor instead.
+        "null_result": distinct_fraction < 0.8 or top1_share > max(0.05, 1.5 / len(captions)),
+    }

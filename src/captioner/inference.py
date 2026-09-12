@@ -15,7 +15,7 @@ import torch
 from omegaconf import DictConfig
 
 from captioner.encoders.registry import build_encoder
-from captioner.model.captioner import Captioner, FusionStack
+from captioner.model.captioner import Captioner, FusionStack, llm_embedding_norm
 from captioner.publish import filter_missing_lora_keys
 from captioner.train.stage1 import build_llm, get_llm_hidden_size
 from captioner.utils.prompt import build_wrapper_text, human_readable_subset
@@ -74,6 +74,7 @@ def load_inference_model(
         qformer_cfg=dict(cfg.qformer),
         projector_hidden_mult=int(cfg.projector.hidden_mult),
         projector_dropout=float(cfg.projector.dropout),
+        adapter_target_norm=llm_embedding_norm(llm),
     )
     fusion_stack.load_state_dict(
         torch.load(Path(checkpoint_dir) / "middle.pt", map_location="cpu", weights_only=False)
@@ -123,6 +124,7 @@ def load_inference_model_from_hub(
         qformer_cfg=dict(cfg.qformer),
         projector_hidden_mult=int(cfg.projector.hidden_mult),
         projector_dropout=float(cfg.projector.dropout),
+        adapter_target_norm=llm_embedding_norm(llm),
     )
     middle_path = hf_hub_download(repo_id=repo_id, filename="middle.pt")
     fusion_stack.load_state_dict(torch.load(middle_path, map_location="cpu", weights_only=False))

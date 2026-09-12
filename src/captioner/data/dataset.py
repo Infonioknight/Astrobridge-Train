@@ -6,6 +6,7 @@ modality requires no change here.
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,7 @@ class CaptionerDataset(Dataset):
             for entry in modalities_cfg.dropout.subset_weights
         ]
 
+        self._epoch = 0
         self.tokenizer = tokenizer
         self.prompt_cfg = prompt_cfg
         self.max_caption_tokens = max_caption_tokens
@@ -120,6 +122,28 @@ class CaptionerDataset(Dataset):
     def __len__(self) -> int:
         return len(self.manifest)
 
+    def set_epoch(self, epoch: int) -> None:
+        """Re-roll the per-object subset and (system, instruction) draw for a new epoch.
+
+        train/loop.py calls this at the top of every epoch. Without it the draw is fixed for the
+        whole run: the pre-fix code seeded on `hash((object_id, idx))` with no epoch term, so
+        each object saw exactly ONE prompt variant and ONE modality subset across all 30 epochs,
+        despite the docstring below claiming otherwise. configs/model.yaml ships 4 system x 10
+        instruction variants specifically so the model does not become brittle to one wording;
+        none of that cross-product was ever reached.
+        """
+        self._epoch = int(epoch)
+
+    def _seed_for(self, object_id: str) -> int:
+        """Stable across processes and runs, unlike `hash()`.
+
+        Python randomises `hash()` of a str per process via PYTHONHASHSEED unless it is pinned,
+        so the pre-fix seeding gave different subsets for the same object on different ranks —
+        real on the 2-node v6 run — and was not reproducible between runs at all.
+        """
+        key = f"{object_id}:{self._epoch}".encode()
+        return int.from_bytes(hashlib.blake2b(key, digest_size=8).digest(), "big")
+
     def _availability(self, row: pd.Series) -> frozenset[str]:
         present = set()
         for name in self.modality_names:
@@ -149,7 +173,7 @@ class CaptionerDataset(Dataset):
         object_id = row["object_id"]
         available = self._availability(row)
 
-        rng = np.random.default_rng(hash((object_id, idx)) & 0xFFFFFFFF)
+        rng = np.random.default_rng(self._seed_for(object_id))
         captioned = self._caption_subsets_by_object.get(object_id, set())
         shown = self._sample_target_subset(available, rng, captioned)
 
@@ -162,9 +186,9 @@ class CaptionerDataset(Dataset):
 
         caption_text = self._captions_by_key.get((object_id, shown), "")
 
-        # Same seeded rng that picked `shown` — so the (system, instruction) draw is reproducible
-        # per (object_id, epoch) but varies across objects and re-rolls each epoch, giving the
-        # model the whole system x instruction cross-product over a run.
+        # Same seeded rng that picked `shown` — reproducible per (object_id, epoch), varying
+        # across objects and genuinely re-rolling each epoch via set_epoch(), which is what gives
+        # the model the whole system x instruction cross-product over a run.
         system, instruction = pick_prompt_variants(self.prompt_cfg, shown, rng)
         pre_text, post_text = build_wrapper_text(self.prompt_cfg, system, instruction)
 

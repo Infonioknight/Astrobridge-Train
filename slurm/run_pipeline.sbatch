@@ -27,7 +27,11 @@
 #SBATCH --job-name=astrobridge-v6
 #SBATCH --account=bfvh-dtai-gh
 #SBATCH --partition=ghx4-interactive
-#SBATCH --nodes=2
+# 1 node. The 2-node/8-rank run (3131676) measured ~1.9 min/epoch vs v5's ~3.5 on 4 GPUs
+# -- 1.8x for 2x the hardware -- and the doubled effective batch pushed stage-1 val_loss to
+# ~1.12 against v5's 1.0589. It also waits longer in the queue. Set nodes=2 again only to
+# exercise the multi-node path in slurm/_accel_node.sh, which is kept and still works.
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --gpus-per-node=4

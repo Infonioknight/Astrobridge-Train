@@ -19,7 +19,9 @@ lora:
 batch_size: 32
 micro_batch_size: 4
 epochs: 15
-early_stop: {metric: val_loss, patience: 1}
+# patience 1 stopped the v6 run at epoch 5 (~102 optimizer steps) on a single non-improving
+# epoch, while the fusion stack was still visibly moving. 3 gives it room without running long.
+early_stop: {metric: val_loss, patience: 3}
 warmup_frac: 0.10
 weight_decay: 0.05
 # LLM precision is controlled by configs/model.yaml's llm.dtype, not here. MUST match stage1 —

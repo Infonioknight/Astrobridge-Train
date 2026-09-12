@@ -31,6 +31,7 @@ class FusionStack(nn.Module):
         qformer_cfg: dict,
         projector_hidden_mult: int,
         projector_dropout: float,
+        adapter_target_norm: float = 1.0,
     ) -> None:
         super().__init__()
         self.modality_names = list(modality_out_dims.keys())
@@ -42,7 +43,15 @@ class FusionStack(nn.Module):
         )
         self.modality_identity = ModalityIdentity(self.modality_names, d_shared)
         self.qformer = SharedQFormer(**qformer_cfg)
-        self.adapter = Adapter(d_shared, d_llm, dropout=qformer_cfg.get("dropout", 0.1))
+        # adapter_target_norm: the LLM's own median token-embedding norm. See Adapter's
+        # docstring — the shipped v6 prefix was 34x this, which is a large part of why the LLM
+        # learned to ignore it. Callers that have the real LLM must pass it.
+        self.adapter = Adapter(
+            d_shared,
+            d_llm,
+            dropout=qformer_cfg.get("dropout", 0.1),
+            target_norm=adapter_target_norm,
+        )
 
     def forward(self, modality_batch: dict[str, dict[str, Tensor]]) -> Tensor:
         """modality_batch: {name: {"tokens": (B, T_m, out_dim), "mask": (B, T_m) bool, True=pad/absent}}
@@ -132,3 +141,12 @@ class Captioner(nn.Module):
         attention_mask = torch.cat([pre_mask, prefix_mask, post_mask, cap_mask], dim=1)
 
         return self.llm(inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels)
+
+
+def llm_embedding_norm(llm: nn.Module) -> float:
+    """Median L2 norm of the LLM's input token embeddings — the scale a prefix vector must match
+    to read as a token rather than as an outlier. Pass into FusionStack(adapter_target_norm=...).
+    """
+    with torch.no_grad():
+        weight = llm.get_input_embeddings().weight
+        return float(weight.float().norm(dim=1).median())

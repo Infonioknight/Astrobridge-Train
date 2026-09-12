@@ -15,9 +15,18 @@ def filter_missing_lora_keys(missing: list[str]) -> list[str]:
 
 
 def build_model_card(
-    base_model_name: str, repo_id: str, state: dict, eval_report: dict | None
+    base_model_name: str,
+    repo_id: str,
+    state: dict,
+    eval_report: dict | None,
+    notes: str | None = None,
 ) -> str:
+    """`notes` is free-form markdown appended under "Release notes" — for the things a JSON gate
+    report cannot say, like "this version's test split is not comparable with the previous one's".
+    Pass it with 06_publish_model.py's --notes-file.
+    """
     eval_section = json.dumps(eval_report, indent=2) if eval_report else "Not yet run — see `make eval`."
+    notes_section = f"\n## Release notes\n\n{notes.strip()}\n" if notes else ""
     return f"""---
 base_model: {base_model_name}
 tags: [astrobridge, captioner, lora, multimodal]
@@ -57,4 +66,4 @@ tokenizer = AutoTokenizer.from_pretrained("{repo_id}")
 ```json
 {eval_section}
 ```
-"""
+{notes_section}"""

@@ -49,3 +49,21 @@ def test_galaxy10_synonyms_real_labels():
         "This is classified as edge-on with bulge.",
         list(GALAXY10_LABEL_SYNONYMS), GALAXY10_LABEL_SYNONYMS,
     ) == "Edge-on Galaxies with Bulge"
+
+
+def test_diversity_gate_does_not_fail_small_groups_with_all_distinct_captions():
+    """top1_share cannot go below 1/n, so a flat 0.05 cutoff fails any group under 20 samples
+    even when every caption is unique. Real case: v7's spectra/desi group had n=19,
+    distinct_fraction 1.000, top1_share 0.0526 — and was reported COLLAPSED.
+    """
+    from collections import Counter
+
+    captions = [f"caption number {i}" for i in range(19)]
+    counts = Counter(captions)
+    distinct_fraction = len(counts) / len(captions)
+    top1_share = counts.most_common(1)[0][1] / len(captions)
+
+    assert distinct_fraction == 1.0
+    assert top1_share > 0.05  # trips the old fixed threshold
+    null_result = distinct_fraction < 0.8 or top1_share > max(0.05, 1.5 / len(captions))
+    assert not null_result, "a group of 19 all-distinct captions must not be flagged as collapsed"
