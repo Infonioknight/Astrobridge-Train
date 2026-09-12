@@ -21,17 +21,33 @@ Two tracks, from the same underlying dataset:
     `astronolan/galaxy10-aion` did, but check `build_raw_inputs_with_image`'s shape assertion
     output on a real run before trusting it blindly).
 
-There is deliberately no "base model" comparison for this modality at all (see `eval/backend.py`'s
-module docstring) — a raw lightcurve array isn't something an out-of-the-box vision-language model
-can consume; only the equipped side is ever evaluated here.
+**Base-model comparison, mirroring the image track's `image_rgb` pattern**: a raw lightcurve array
+genuinely isn't something an out-of-the-box vision-language model can consume directly (still
+true), but `render_lightcurve_plot` below turns one object's `atcat_*` photometry into an ordinary
+flux-vs-time PNG scatter plot, which the base model's native-vision pathway *can* consume, same as
+`eval.datasets.image_galaxy10.decode_rgb_image` feeds the image track's base side. This is a real,
+independent rendering, not a proxy for what the equipped side sees (which reads the raw
+`atcat_flux`/`atcat_flux_error`/`atcat_band_id`/`atcat_use` arrays directly, never a plot).
+
+**Deterministic classification (`SN_REASONING_PROMPT`/`SN_CANDIDATES`)**: earlier digit-code and
+free-text prompting both showed real compliance failures — a bare digit collapses to one symbol
+regardless of the object (confirmed live: base emitted `"2"` on 28/30 objects, equipped never
+emitted `"1"` once), and free text needs fuzzy parsing that can fail outright (confirmed live on
+v5: equipped's parse rate collapsed to 53% under the chat template). `SN_REASONING_PROMPT` sidesteps
+both by never asking for a label at all — the model reasons freely, then `eval/backend.py`'s
+`.classify(...)` scores `SN_CANDIDATES`'s three exact label strings as teacher-forced continuations
+and takes the argmax, which is always one of the three by construction: no parsing, no unparseable
+output, fully deterministic given the same weights.
 """
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
+from PIL import Image
 
 from captioner.data.transients_dataset import (
     LIGHTCURVE_COLUMNS,
@@ -49,6 +65,35 @@ YSE_HF_PATH = "BuildNg/astrobridge-yse-test-dataset-v2"
 SN_LABELS = ["SN Ia", "SN II", "SN Ibc"]
 
 HOST_IMAGE_COLUMNS = ["object_id", "class_label", "image_flux", "image_bands", "image_modality"]
+
+# Digit-code label mapping, SN_LABELS order — kept selectable (`--answer-format digit_code`)
+# alongside the default `logprob_argmax` path so the two can be compared on the same objects.
+SN_CLASS_CODES: dict[str, str] = {str(i): label for i, label in enumerate(SN_LABELS)}
+SN_CLASS_CODE_LEGEND = "\n".join(f"{code}={name}" for code, name in SN_CLASS_CODES.items())
+SN_CLASS_CODE_PROMPT = (
+    "Supernova light curve classifier. Output ONLY the digit code, nothing else.\n"
+    f"{SN_CLASS_CODE_LEGEND}\n"
+    "Light curve class code:"
+)
+
+# --- Deterministic classification (the default path, see module docstring) --------------------
+#
+# Deliberately contains no digits, letters, or a request to name a class at all — asking for that
+# is exactly what corrupted the digit-code and free-text paths (see module docstring). The model
+# only ever has to reason about the observation; `eval/backend.py`'s `.classify(...)` handles
+# turning that reasoning into a label by scoring `SN_CANDIDATES` as its continuation.
+SN_REASONING_PROMPT = (
+    "Examine this supernova light curve: note its total duration, the peak brightness reached in "
+    "each band, how quickly it declines after peak, and whether there is any gap in the "
+    "observations. Based on the evidence above, the classification is:"
+)
+
+# Leading space on each candidate: these are scored as a direct continuation of
+# SN_REASONING_PROMPT's answer, not as a standalone sentence — verified against the real Qwen3.5-9B
+# tokenizer that " SN Ia"/" SN II"/" SN Ibc" all share the same first token (`' SN'`), so
+# first-token scoring is impossible and full-sequence scoring (`score_completions`/
+# `score_completions_qwen_native`) is mandatory, not a refinement.
+SN_CANDIDATES = [f" {label}" for label in SN_LABELS]
 
 
 def load_lightcurve_table(
@@ -74,6 +119,138 @@ def load_host_image_table(
     """
     df = _download_and_read(hf_path, revision, cache_dir, HOST_IMAGE_COLUMNS)
     return _deduplicate_by_object_id(df, "YSE eval host-image table")
+
+
+# 1=g, 2=r per captioner.data.transients_dataset's module docstring (`atcat_band_id`); 0 is the
+# excluded-i sentinel, always masked out by `atcat_use` below before it's ever plotted.
+_BAND_PLOT_STYLE = {1: {"color": "tab:green", "label": "g-band"}, 2: {"color": "tab:red", "label": "r-band"}}
+
+
+def render_lightcurve_plot(row: pd.Series) -> Image.Image:
+    """Renders one `load_lightcurve_table` row's `atcat_*` photometry as a flux-vs-time PNG
+    scatter/errorbar plot — the base model's `{"image": <PIL.Image>}` input (`eval.backend`'s
+    base-side contract). Masks by `atcat_use` first (the excluded-i sentinel at `atcat_band_id=0`
+    is only safe to drop via this mask), then plots g/r separately by color so the model has some
+    chance of reading band information off the picture the same way it would off two colored
+    curves in a real light-curve plot.
+    """
+    import matplotlib
+    matplotlib.use("Agg")  # headless — this runs inside eval collection loops/Modal containers, never a GUI session
+    import matplotlib.pyplot as plt
+
+    mjd = np.asarray(row["lc_mjd"], dtype=float)
+    flux = np.asarray(row["atcat_flux"], dtype=float)
+    flux_err = np.asarray(row["atcat_flux_error"], dtype=float)
+    band_id = np.asarray(row["atcat_band_id"], dtype=int)
+    use = np.asarray(row["atcat_use"], dtype=bool)
+    mjd, flux, flux_err, band_id = mjd[use], flux[use], flux_err[use], band_id[use]
+
+    order = np.argsort(mjd)
+    mjd, flux, flux_err, band_id = mjd[order], flux[order], flux_err[order], band_id[order]
+    t0 = mjd[0] if len(mjd) else 0.0
+
+    fig, ax = plt.subplots(figsize=(6, 4), dpi=100)
+    any_plotted = False
+    for bid, style in _BAND_PLOT_STYLE.items():
+        m = band_id == bid
+        if np.any(m):
+            ax.errorbar(mjd[m] - t0, flux[m], yerr=flux_err[m], fmt="o", markersize=4, capsize=2, **style)
+            any_plotted = True
+    ax.set_xlabel("Days since first detection")
+    ax.set_ylabel("Flux (SNANA FLUXCAL, zp=27.5)")
+    ax.set_title(f"Light curve — object {row.get('object_id', '')}")
+    if any_plotted:
+        ax.legend()
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf).convert("RGB")
+
+
+def stratified_sample(
+    table: pd.DataFrame, n_total: int, seed: int, min_per_class: int = 2, label_col: str = "class_label",
+) -> pd.DataFrame:
+    """Same "largest remainder" apportionment algorithm as `eval.datasets.image_galaxy10.
+    stratified_sample` — one `numpy.random.default_rng(seed)`, consumed in `SN_LABELS`' fixed
+    order, so the same seed always draws the same objects; raises rather than silently returning a
+    bigger-or-smaller-than-requested sample if `n_total` is infeasible.
+    """
+    rng = np.random.default_rng(seed)
+    groups = {label: table.index[table[label_col] == label].to_numpy() for label in SN_LABELS}
+    sizes = {label: len(idx) for label, idx in groups.items()}
+    total_available = sum(sizes.values())
+    if n_total > total_available:
+        raise ValueError(f"n_total={n_total} exceeds the {total_available} objects available across all {len(SN_LABELS)} classes.")
+    min_feasible = sum(min(min_per_class, sizes[label]) for label in SN_LABELS)
+    if n_total < min_feasible:
+        raise ValueError(
+            f"n_total={n_total} is below {min_feasible}, the minimum needed to give every class at "
+            f"least min_per_class={min_per_class} (capped by classes with fewer available, e.g. "
+            f"SN Ibc has only {sizes.get('SN Ibc', 0)}). Raise n_total or lower min_per_class — "
+            "returning a silently-larger-than-requested sample here would break the 'exactly "
+            "n_total, reproducibly' contract."
+        )
+
+    raw_share = {label: n_total * sizes[label] / total_available for label in SN_LABELS}
+    target = {label: min(sizes[label], max(min_per_class, int(np.floor(raw_share[label])))) for label in SN_LABELS}
+
+    by_largest_remainder = sorted(SN_LABELS, key=lambda label: raw_share[label] - np.floor(raw_share[label]), reverse=True)
+    by_smallest_remainder = list(reversed(by_largest_remainder))
+
+    while sum(target.values()) > n_total:
+        progressed = False
+        for label in by_smallest_remainder:
+            if sum(target.values()) <= n_total:
+                break
+            if target[label] > min_per_class:
+                target[label] -= 1
+                progressed = True
+        if not progressed:
+            break
+
+    while sum(target.values()) < n_total:
+        progressed = False
+        for label in by_largest_remainder:
+            if sum(target.values()) >= n_total:
+                break
+            if target[label] < sizes[label]:
+                target[label] += 1
+                progressed = True
+        if not progressed:
+            break
+
+    sampled_indices = []
+    for label in SN_LABELS:
+        chosen = rng.choice(groups[label], size=target[label], replace=False)
+        sampled_indices.extend(chosen.tolist())
+
+    return table.loc[sampled_indices].reset_index(drop=True)
+
+
+def balanced_sample(
+    table: pd.DataFrame, per_class: int, seed: int, label_col: str = "class_label",
+) -> pd.DataFrame:
+    """Exactly `per_class` objects from EACH class — an equal-bucket draw, not the
+    population-proportional one `stratified_sample` does. Deterministic given `seed`. Raises if any
+    class has fewer than `per_class` objects rather than silently returning an unbalanced sample.
+    """
+    rng = np.random.default_rng(seed)
+    groups = {label: table.index[table[label_col] == label].to_numpy() for label in SN_LABELS}
+    short = {label: len(idx) for label, idx in groups.items() if len(idx) < per_class}
+    if short:
+        raise ValueError(
+            f"balanced_sample(per_class={per_class}) needs {per_class} of every class, but "
+            f"{short} — lower per_class to at most {min(len(idx) for idx in groups.values())}."
+        )
+
+    sampled_indices = []
+    for label in SN_LABELS:
+        chosen = rng.choice(groups[label], size=per_class, replace=False)
+        sampled_indices.extend(chosen.tolist())
+    return table.loc[sampled_indices].reset_index(drop=True)
 
 
 def build_raw_inputs_lightcurve(row: pd.Series, cfg, seed: int = 0) -> dict:

@@ -23,25 +23,6 @@ def cache_dir_for(base_out_dir: Path, modality: str, spec_hash: str) -> Path:
     return base_out_dir / modality / spec_hash
 
 
-def _shard_object_ids(
-    object_ids: list[str], shard: int, group_key: dict[str, object] | None
-) -> list[list[str]]:
-    """Splits `object_ids` into batches of at most `shard`, never mixing two `group_key` values.
-
-    Group order and within-group order both follow first appearance in `object_ids`, so the result
-    is deterministic for a given manifest — re-running the cache reproduces the same shards.
-    """
-    if group_key is None:
-        return [object_ids[i : i + shard] for i in range(0, len(object_ids), shard)]
-
-    grouped: dict[object, list[str]] = {}
-    for object_id in object_ids:
-        grouped.setdefault(group_key.get(object_id), []).append(object_id)
-    return [
-        ids[i : i + shard] for ids in grouped.values() for i in range(0, len(ids), shard)
-    ]
-
-
 def cache_modality(
     name: str,
     encoder: ModalityEncoder,
@@ -50,20 +31,9 @@ def cache_modality(
     batch_loader,  # callable: list[object_id] -> encoder-specific batch dict, e.g. {"pixel_values": Tensor}
     out_dir: Path,
     shard: int = 256,
-    group_key: dict[str, object] | None = None,
 ) -> tuple[Path, list[str]]:
     """Writes float16 shards keyed by object_id + an index parquet including the full encoder
     spec, so training can assert the cache matches the config it was built against.
-
-    `group_key` maps object_id -> a hashable key that objects must agree on to share a shard.
-    Encoders take a single stacked tensor per call, so a batch whose members disagree on shape
-    cannot be built at all — real case: this dataset's legacy-south cutouts are 160x160 and its
-    legacy-north ones 152x152 (see data/image_dataset.py:image_shape_groups), and sharding in plain
-    manifest order eventually straddles that boundary and dies in the batch loader. Objects are
-    partitioned by key first and sharded within each partition, so every batch is homogeneous;
-    shard *contents* change but nothing downstream depends on which shard an object landed in
-    (index.parquet records shard_file/row_in_shard per object). `None` means one partition, i.e.
-    exactly the previous behaviour.
 
     Returns `(target_dir, excluded_object_ids)`. An object's embedding can come back all-NaN even
     though the encoder call itself succeeds — the confirmed real cause is `_flux_to_array` in
@@ -89,22 +59,16 @@ def cache_modality(
         flag_col = None
     object_ids = manifest["object_id"].tolist() if flag_col is None else manifest.loc[manifest[flag_col], "object_id"].tolist()
 
-    batches = _shard_object_ids(object_ids, shard, group_key)
-    if group_key is not None:
-        n_groups = len({group_key.get(o) for o in object_ids})
-        logger.info(
-            f"[{name}] {len(object_ids)} objects fall into {n_groups} shape group(s); "
-            f"sharding within each so no batch mixes shapes"
-        )
-
     index_rows = []
     excluded_ids: list[str] = []
-    for shard_idx, shard_ids in enumerate(batches):
+    for shard_start in range(0, len(object_ids), shard):
+        shard_ids = object_ids[shard_start : shard_start + shard]
         batch = batch_loader(shard_ids)
         with torch.no_grad():
             out = encoder.encode(batch)  # (B, T, out_dim), token-level — never pooled
         arr = out.to(torch.float16).cpu().numpy()
 
+        shard_idx = shard_start // shard
         shard_path = target_dir / f"shard_{shard_idx:05d}.npy"
         np.save(shard_path, arr)
 

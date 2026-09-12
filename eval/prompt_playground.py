@@ -70,7 +70,7 @@ TEST_IMAGES = [
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=["local", "modal"], default="local")
-    parser.add_argument("--repo-id", default="UniverseTBD/astrobridge-model-v3_qwen")
+    parser.add_argument("--repo-id", default="UniverseTBD/astrobridge-model-v5")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 

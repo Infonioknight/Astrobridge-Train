@@ -1,10 +1,6 @@
-"""build_manifest's join paths.
-
-The direct object_id merge is preferred whenever the image source's object_id really is
-AstroBridge-Data's own — the predecessor dataset's `target_object_id_target` was, so that path is
-kept and still tested. Today's source (gapatron/astrobridge-image-captions) carries the Legacy
-Survey's own ids instead and deliberately exposes them as `object_id_legacy`, which routes
-build_manifest through the coordinate crossmatch. See manifest.py.
+"""build_manifest's direct object_id join — legacy_south_all_images.parquet's
+target_object_id_target is AstroBridge-Data's own object_id, so this path should be preferred
+over coordinate crossmatching whenever it's available (see manifest.py).
 """
 from __future__ import annotations
 
@@ -178,70 +174,3 @@ def test_colliding_transient_ids_raise_rather_than_duplicating_rows():
             assert False, "expected ValueError on colliding object_id"
         except ValueError as e:
             assert "collide" in str(e)
-
-
-def test_coordinate_crossmatch_backfills_object_id_for_image_only_rows():
-    """The live path for gapatron/astrobridge-image-captions. Image-only rows contribute no
-    AstroBridge-Data object_id, and left as NaN every one of them stringifies to the same "nan",
-    collapsing thousands of distinct objects into one duplicated manifest key.
-    """
-    spectra_df = pd.DataFrame(
-        {
-            "object_id": ["spec_a"],
-            "ra": [10.0],
-            "dec": [-5.0],
-            "has_spectra": [True],
-        }
-    )
-    # First row is within 1 arcsec of spec_a (joint); the other two match nothing.
-    image_df = pd.DataFrame(
-        {
-            "object_id_legacy": ["0001m057-6125", "100313", "8373"],
-            "survey": ["legacy-south", "legacy-north", "legacy-north"],
-            "ra": [10.0, 200.0, 210.0],
-            "dec": [-5.0, 40.0, 41.0],
-            "has_image": [True, True, True],
-        }
-    )
-
-    with patch("captioner.data.manifest._load_spectra_table", return_value=spectra_df), patch(
-        "captioner.data.manifest._load_image_table", return_value=image_df
-    ):
-        manifest, stats = build_manifest(_cfg())
-
-    assert stats["join_method"] == "coord@1.0arcsec"
-    assert manifest["object_id"].is_unique
-    assert not manifest["object_id"].isin(["nan", "None"]).any()
-
-    by_id = manifest.set_index("object_id")
-    assert by_id.loc["spec_a", "tier"] == "joint"
-    assert by_id.loc["spec_a", "object_id_legacy"] == "0001m057-6125"
-    # Image-only objects keep the Legacy Survey id as their manifest key.
-    assert by_id.loc["100313", "has_image"] == True  # noqa: E712
-    assert by_id.loc["100313", "has_spectra"] == False  # noqa: E712
-    assert by_id.loc["8373", "tier"] == "single"
-
-
-def test_image_only_object_id_matches_what_the_embedding_cache_is_keyed_by():
-    """02_cache_embeddings.py maps manifest object_id -> object_id_legacy to find pixels. For
-    image-only rows the two must agree, or the map silently omits them.
-    """
-    spectra_df = pd.DataFrame(
-        {"object_id": ["spec_a"], "ra": [10.0], "dec": [-5.0], "has_spectra": [True]}
-    )
-    image_df = pd.DataFrame(
-        {
-            "object_id_legacy": ["north_1"],
-            "ra": [200.0],
-            "dec": [40.0],
-            "has_image": [True],
-        }
-    )
-
-    with patch("captioner.data.manifest._load_spectra_table", return_value=spectra_df), patch(
-        "captioner.data.manifest._load_image_table", return_value=image_df
-    ):
-        manifest, _ = build_manifest(_cfg())
-
-    row = manifest[manifest["object_id"] == "north_1"].iloc[0]
-    assert row["object_id_legacy"] == "north_1"

@@ -42,23 +42,28 @@ def main() -> None:
         f"dataset access: {cfg.sources.image.hf_path}",
         lambda: api.dataset_info(cfg.sources.image.hf_path),
     )
+    results["image caption dataset (repo)"] = _check(
+        f"dataset access: {cfg.sources.image_captions.hf_path}",
+        lambda: api.dataset_info(cfg.sources.image_captions.hf_path),
+    )
 
     def _check_image_files():
-        from fnmatch import fnmatch
-
-        from captioner.data.image_dataset import DATA_FILE_PATTERN
-
         files = api.list_repo_files(cfg.sources.image.hf_path, repo_type="dataset")
-        shards = [f for f in files if fnmatch(f, DATA_FILE_PATTERN)]
-        if not shards:
+        if "legacy_south_all_images.parquet" not in files:
             raise FileNotFoundError(
-                f"No files matching {DATA_FILE_PATTERN!r} in the repo listing — both image-tier "
-                "captions and the pixel-data pipeline (02_cache_embeddings.py) read these shards; "
-                "check configs/data.yaml and data/image_dataset.py:DATA_FILE_PATTERN."
+                "legacy_south_all_images.parquet not found in repo file listing — "
+                "the image pixel-data pipeline (02_cache_embeddings.py) depends on this exact "
+                "filename; check configs/data.yaml and data/image_dataset.py:FLUX_PARQUET_FILENAME."
+            )
+        cap_files = api.list_repo_files(cfg.sources.image_captions.hf_path, repo_type="dataset")
+        if not any(f.startswith("data/") and f.endswith(".parquet") for f in cap_files):
+            raise FileNotFoundError(
+                f"No data/*.parquet in {cfg.sources.image_captions.hf_path} — image-tier "
+                "captions (caption_fused) depend on these."
             )
 
     results["image dataset (required files)"] = _check(
-        f"{cfg.sources.image.hf_path} data/train-*.parquet shards present in the repo listing",
+        "legacy_south_all_images.parquet + image_captions data/*.parquet present in the repo listings",
         _check_image_files,
     )
 

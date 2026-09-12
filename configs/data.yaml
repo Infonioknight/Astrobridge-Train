@@ -10,11 +10,15 @@ sources:
     files:
       - observations/spectra/desi_sdss_subset_crossmatch_nolan_1.0arcsec.parquet
   image:
-    # 3,487 Legacy Survey cutouts (2,399 legacy-south + 1,088 legacy-north) with real calibrated
-    # per-band flux AND four stages of Gemini captions in one parquet dataset. Replaces
-    # gapatron/legacy_survey_south_images_captions, which was south-only and split the same
-    # content across loose *_captions.json files plus a separate legacy_south_all_images.parquet.
-    # Public — no access request needed, unlike its predecessor.
+    # PIXEL/FLUX source only now — `legacy_south_all_images.parquet` (real calibrated per-band
+    # flux for AION). Captions moved to their own repo below.
+    hf_path: gapatron/legacy_survey_south_images_captions
+    revision: null   # not a `datasets.load_dataset`-shaped repo — see data/image_dataset.py.
+  image_captions:
+    # `caption_fused` — Gemini's merged blind+properties+literature caption, one row per object
+    # in parquet shards. Was gapatron/legacy_survey_south_images_captions' per-object
+    # *_captions.json (`caption_blind`); this repo is the same author's superset. Keyed by
+    # object_id in the Legacy Survey namespace (matched via object_id_legacy, same as before).
     hf_path: gapatron/astrobridge-image-captions
     # Pinned deliberately. This dataset's caption text gets rewritten in place, so `revision:
     # null` would silently change what a run trained on. History so far, every one a full
@@ -121,8 +125,7 @@ captions:
   out_dir: outputs/captions
   parquet: outputs/captions/captions.parquet
   report: outputs/captions/decomposition_report.json
-  # Image-tier captions come directly from gapatron's pre-vetted caption field (see
-  # `sources.image.caption_field` above and data/image_dataset.py), not from keyword-based
-  # decomposition — so `rule_based_v0` below only governs decomposition of AstroBridge-Data's
-  # `mention_summary` (spectra + relational claims).
+  # Image-tier captions come directly from gapatron's pre-vetted `caption_blind` field (see
+  # data/image_dataset.py), not from keyword-based decomposition — so `rule_based_v0` below only
+  # governs decomposition of AstroBridge-Data's `mention_summary` (spectra + relational claims).
   generator: rule_based_v0     # swap for an LLM-backed extractor; see src/captioner/data/captions.py

@@ -99,6 +99,26 @@ SHUFFLED_CLASS_CODE_PROMPT = (
     "Image class code:"
 )
 
+# --- Deterministic classification (the default path, see eval.datasets.lightcurve_yse's module
+# docstring for the full rationale — the same digit-emission compliance failure showed up here
+# too: CLASS_CODE_PROMPT's digit-code answers never once used 4 of the 10 digits across a real
+# n=150 run, regardless of image content). REASONING_PROMPT never asks for a digit or a class
+# name at all; `eval/backend.py`'s `.classify(...)` scores CANDIDATES as a teacher-forced
+# continuation of the model's free reasoning and takes the argmax — always one of the 10 labels
+# by construction, no parsing, no digit-token bias possible.
+REASONING_PROMPT = (
+    "Examine this galaxy image: describe its overall shape (round, cigar-shaped, or disk-like), "
+    "whether spiral arms are visible and how tightly or loosely wound they are, whether a central "
+    "bar is present, whether a disk is seen edge-on or face-on and whether it has a prominent "
+    "central bulge, and whether the galaxy shows signs of disturbance or merging with a companion. "
+    "Based on the evidence above, the classification is:"
+)
+
+# Leading space on each candidate, same reason as eval.datasets.lightcurve_yse.SN_CANDIDATES: a
+# clean BPE boundary regardless of what precedes it, so scoring is length-invariant and robust to
+# the reasoning text's exact ending.
+CANDIDATES = [f" {label}" for label in GALAXY10_LABELS]
+
 # Working hypothesis only (see module docstring) — verify before trusting load_galaxy10_aion_bands.
 _HYPOTHESIZED_BAND_ORDER = ["g", "r", "i", "z"]
 _KEEP_BAND_INDICES = [0, 1, 3]  # g, r, z — dropping index 2 ("i")
